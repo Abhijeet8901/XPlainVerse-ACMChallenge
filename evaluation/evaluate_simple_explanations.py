@@ -28,6 +28,7 @@ DEFAULT_BERT_RESCALE_WITH_BASELINE = False
 DEFAULT_ID_KEYS = ("sample_id",)
 DEFAULT_SIMPLE_KEYS = ("simple_explanation",)
 DEFAULT_SLE_MODEL_ID = "liamcripwell/sle-base"
+DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "data" / "val_ground_truth.jsonl"
 
 
 def _compute_bertscore_batch(
@@ -243,7 +244,7 @@ def evaluate_simple_submission(args: argparse.Namespace) -> Dict[str, Any]:
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Evaluate simple explanations from a submission JSONL against reference JSONL.")
     parser.add_argument("--submission", required=True, help="Path to participant submission JSONL.")
-    parser.add_argument("--ground-truth", required=True, help="Path to released validation/development ground-truth JSONL.")
+    parser.add_argument("--ground-truth", default=DEFAULT_GROUND_TRUTH_PATH, help="Path to validation ground-truth JSONL.")
     parser.add_argument("--output", required=True, help="Path to write the simple evaluation JSON report.")
     parser.add_argument("--submission-id-keys", nargs="+", default=list(DEFAULT_ID_KEYS))
     parser.add_argument("--reference-id-keys", nargs="+", default=list(DEFAULT_ID_KEYS))

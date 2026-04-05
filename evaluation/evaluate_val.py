@@ -36,6 +36,7 @@ DEFAULT_SYSTEM_PROMPT_COVERAGE = "You are a careful semantic coverage assistant.
 DEFAULT_QWEN_BATCH_SIZE = 4
 DEFAULT_BERT_BATCH_SIZE = 8
 DEFAULT_SLE_BATCH_SIZE = 16
+DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "data" / "val_ground_truth.jsonl"
 
 
 def _write_progress_message(iterator, message):
@@ -573,7 +574,7 @@ def main() -> None:
         description="Run end-to-end evaluation in stage-wise batches on one GPU."
     )
     parser.add_argument("--submission", required=True)
-    parser.add_argument("--ground-truth", required=True)
+    parser.add_argument("--ground-truth", default=DEFAULT_GROUND_TRUTH_PATH)
     parser.add_argument("--output-dir", required=True)
 
     parser.add_argument("--submission-id-keys", nargs="+", default=["sample_id"])
@@ -606,6 +607,7 @@ def main() -> None:
     parser.add_argument("--attn-implementation", default=None)
     parser.add_argument("--hf-cache-dir", default=None)
     parser.add_argument("--enable-thinking", action="store_true", default=False)
+    parser.add_argument("--skip-qwen", action="store_true", default=False)
     parser.add_argument("--no-preload-models", action="store_true", default=False)
     parser.add_argument("--no-progress", action="store_true", default=False)
 
@@ -636,63 +638,66 @@ def main() -> None:
         print("Alignment diagnostics: {0}".format(len(diagnostics)))
 
     rows = _prepare_rows(aligned_rows, args, args.show_progress)
-    extraction_prompt = load_text(args.entity_fact_prompt)
-    coverage_prompt = load_text(args.semantic_coverage_prompt)
+    if args.skip_qwen:
+        print("Skipping Qwen extraction and coverage. Qwen-based complex metrics will be written as null.")
+    else:
+        extraction_prompt = load_text(args.entity_fact_prompt)
+        coverage_prompt = load_text(args.semantic_coverage_prompt)
 
-    if args.preload_models and args.backend == "transformers":
-        print("Preloading Qwen model...")
-        preload_chat_model(
-            backend=args.backend,
-            model=args.model_name,
-            device_map=args.device_map,
-            torch_dtype=args.torch_dtype,
-            trust_remote_code=args.trust_remote_code,
-            attn_implementation=args.attn_implementation,
-            cache_dir=args.hf_cache_dir,
+        if args.preload_models and args.backend == "transformers":
+            print("Preloading Qwen model...")
+            preload_chat_model(
+                backend=args.backend,
+                model=args.model_name,
+                device_map=args.device_map,
+                torch_dtype=args.torch_dtype,
+                trust_remote_code=args.trust_remote_code,
+                attn_implementation=args.attn_implementation,
+                cache_dir=args.hf_cache_dir,
+            )
+
+        _run_extraction_stage(
+            rows,
+            text_key="_reference_complex_text",
+            output_key="_gt_extraction",
+            prompt_template=extraction_prompt,
+            args=args,
+            desc="Qwen extract ground truth",
+            show_progress=args.show_progress,
+        )
+        _run_extraction_stage(
+            rows,
+            text_key="_submission_complex_text",
+            output_key="_pred_extraction",
+            prompt_template=extraction_prompt,
+            args=args,
+            desc="Qwen extract prediction",
+            show_progress=args.show_progress,
+        )
+        _run_coverage_stage(
+            rows,
+            reference_payload_key="_gt_extraction",
+            candidate_text_key="_submission_complex_text",
+            entity_output_key="_gt_to_pred_entity",
+            fact_output_key="_gt_to_pred_fact",
+            prompt_template=coverage_prompt,
+            args=args,
+            desc="Qwen coverage gt->pred",
+            show_progress=args.show_progress,
+        )
+        _run_coverage_stage(
+            rows,
+            reference_payload_key="_pred_extraction",
+            candidate_text_key="_reference_complex_text",
+            entity_output_key="_pred_to_gt_entity",
+            fact_output_key="_pred_to_gt_fact",
+            prompt_template=coverage_prompt,
+            args=args,
+            desc="Qwen coverage pred->gt",
+            show_progress=args.show_progress,
         )
 
-    _run_extraction_stage(
-        rows,
-        text_key="_reference_complex_text",
-        output_key="_gt_extraction",
-        prompt_template=extraction_prompt,
-        args=args,
-        desc="Qwen extract ground truth",
-        show_progress=args.show_progress,
-    )
-    _run_extraction_stage(
-        rows,
-        text_key="_submission_complex_text",
-        output_key="_pred_extraction",
-        prompt_template=extraction_prompt,
-        args=args,
-        desc="Qwen extract prediction",
-        show_progress=args.show_progress,
-    )
-    _run_coverage_stage(
-        rows,
-        reference_payload_key="_gt_extraction",
-        candidate_text_key="_submission_complex_text",
-        entity_output_key="_gt_to_pred_entity",
-        fact_output_key="_gt_to_pred_fact",
-        prompt_template=coverage_prompt,
-        args=args,
-        desc="Qwen coverage gt->pred",
-        show_progress=args.show_progress,
-    )
-    _run_coverage_stage(
-        rows,
-        reference_payload_key="_pred_extraction",
-        candidate_text_key="_reference_complex_text",
-        entity_output_key="_pred_to_gt_entity",
-        fact_output_key="_pred_to_gt_fact",
-        prompt_template=coverage_prompt,
-        args=args,
-        desc="Qwen coverage pred->gt",
-        show_progress=args.show_progress,
-    )
-
-    clear_chat_model_cache()
+        clear_chat_model_cache()
 
     if args.preload_models:
         print("Preloading BERTScore and SLE models...")
