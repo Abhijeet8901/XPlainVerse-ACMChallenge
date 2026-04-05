@@ -1,0 +1,30 @@
+--index-url https://pypi.org/simple
+--extra-index-url https://download.pytorch.org/whl/cu124
+
+accelerate==1.12.0
+bert-score==0.3.13
+certifi==2026.2.25
+charset-normalizer==3.4.7
+filelock==3.25.2
+fsspec==2026.2.0
+hf-xet==1.4.3
+huggingface_hub==1.9.0
+httpx==0.28.1
+idna==3.11
+matplotlib==3.10.8
+numpy==2.2.6
+packaging==26.0
+PyYAML==6.0.3
+regex==2026.3.32
+requests==2.33.1
+safetensors==0.7.0
+sentencepiece==0.2.1
+tokenizers==0.22.2
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+torchvision==0.21.0+cu124
+tqdm==4.67.3
+typer==0.24.1
+typing_extensions==4.15.0
+urllib3==2.6.3
+transformers @ git+https://github.com/huggingface/transformers.git@db9f18c370c92e971172e69bc9a88854947d9fc5

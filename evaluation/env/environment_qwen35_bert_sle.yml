@@ -1,0 +1,9 @@
+name: xplainverse_eval_full
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10.20
+  - pip=25.0
+  - git
+  - pip:
+      - -r requirements_qwen35_bert_sle.txt

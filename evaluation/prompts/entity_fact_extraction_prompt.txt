@@ -1,0 +1,87 @@
+You are an information extraction system.
+
+Task:
+Given an explanation of why an image looks fake or real, extract only:
+
+1. diagnostic_entities:
+   the entities that are actually used as evidence for the authenticity judgment
+
+2. evidence_claims:
+   the specific claims that explain why those entities make the image look fake or real
+
+Important:
+Do NOT extract all entities mentioned in the explanation.
+Do NOT extract all factual statements.
+Extract only the entities and claims that function as evidence for the fake/real judgment.
+
+Definitions:
+
+Diagnostic entity:
+A person, object, text element, clothing element, body region, or scene component that is explicitly used as evidence for why the image looks fake or real.
+
+Evidence claim:
+A compact, checkable claim about a diagnostic entity that directly supports the authenticity judgment.
+
+What to exclude:
+- entities mentioned only for context
+- descriptive facts that do not support the fake/real reasoning
+- generic conclusions such as "the image looks fake" or "the image looks real"
+- identity, location, color, or presence details unless they are themselves part of the evidence
+
+Entity selection rule:
+Include an entity only if the explanation uses it as evidence for authenticity or manipulation.
+
+Claim selection rule:
+Include a claim only if removing it would weaken the explanation for why the image looks fake or real.
+
+Granularity policy:
+- Prefer coarse, meaningful entities
+- Prefer compact, meaningful claims
+- Do not over-split one natural observation into many tiny claims
+- But do split clearly distinct pieces of evidence into separate claims
+
+Examples of the intended behavior:
+- If a person is mentioned only to identify another evidence-bearing item, do not include the person as an entity
+- If a phrase is only contextual and not part of the authenticity reasoning, do not extract it as a claim
+- If an entity has multiple distinct evidence-based issues, extract multiple claims for that entity
+- If multiple descriptors belong to one natural evidence unit, keep them together
+
+Rules:
+1. Use only information explicitly stated in the explanation
+2. Do not infer unstated causes, intentions, or visual details
+3. Extract only evidence-bearing entities
+4. Extract only evidence-bearing claims
+5. Each claim must be specific and checkable
+6. Keep wording normalized and concise
+7. Avoid redundancy
+8. Do not create entities for minor sub-parts unless the explanation is clearly centered on them
+9. Do not include non-evidential context
+10. Return valid JSON only
+
+Output schema:
+{
+  "diagnostic_entities": [
+    {
+      "entity_id": "E1",
+      "name": "..."
+    }
+  ],
+  "evidence_claims": [
+    {
+      "claim_id": "C1",
+      "entity_id": "E1",
+      "claim": "..."
+    }
+  ]
+}
+
+Additional guidance:
+- Prefer the entity that actually carries the evidence
+- Do not include broader context entities when the evidence is really about a more specific visual element
+- Exclude claims whose role is only to identify or locate an entity
+- Include only claims that explain why the image appears fake or real
+- If a claim can be removed without weakening the fake/real reasoning, exclude it
+
+Now process the following explanation:
+
+{{EXPLANATION_TEXT}}
