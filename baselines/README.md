@@ -266,26 +266,12 @@ The fine-tuned model weights (LoRA merged) are available on Hugging Face:
 
 | Model | Hugging Face Link |
 |-------|-------------------|
-| Qwen3-VL-8B-XPlainVerse | [Abhijeet8901/Qwen3-VL-8B-XPlainVerse](https://huggingface.co/Abhijeet8901/Qwen3-VL-8B-XPlainVerse) |
-| InternVL3.5-14B-XPlainVerse | [Abhijeet8901/InternVL3_5-14B-XPlainVerse](https://huggingface.co/Abhijeet8901/InternVL3_5-14B-XPlainVerse) |
+| Qwen3-VL-8B-XPlainVerse | [kartik060702/Qwen3-VL-8B-XPlainVerse](https://huggingface.co/kartik060702/Qwen3-VL-8B-XPlainVerse) |
+| InternVL3.5-14B-XPlainVerse | [kartik060702/InternVL3_5-14B-XPlainVerse](https://huggingface.co/kartik060702/InternVL3_5-14B-XPlainVerse) |
 
 ```bash
 # Download models
-huggingface-cli download Abhijeet8901/Qwen3-VL-8B-XPlainVerse --local-dir ./Qwen3-VL-8B-XPlainVerse
-huggingface-cli download Abhijeet8901/InternVL3_5-14B-XPlainVerse --local-dir ./InternVL3_5-14B-XPlainVerse
+huggingface-cli download kartik060702/Qwen3-VL-8B-XPlainVerse --local-dir ./Qwen3-VL-8B-XPlainVerse
+huggingface-cli download kartik060702/InternVL3_5-14B-XPlainVerse --local-dir ./InternVL3_5-14B-XPlainVerse
 ```
 
----
-
-## Citation
-
-If you use these baselines, please cite the XPlainVerse dataset:
-
-```bibtex
-@dataset{xplainverse2026,
-    title={XPlainVerse: A Large-Scale Explainable AI-Generated Image Detection Dataset},
-    author={Abhijeet8901},
-    year={2026},
-    url={https://huggingface.co/datasets/Abhijeet8901/XPlainVerse}
-}
-```
