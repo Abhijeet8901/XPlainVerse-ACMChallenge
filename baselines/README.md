@@ -1,11 +1,11 @@
 # Baselines for XPlainVerse ACM Challenge
 
-This document describes how we set up, fine-tuned, and evaluated two baseline models for the XPlainVerse AI-Generated Image Detection challenge:
+This document describes how we set up, fine-tuned, and evaluated two baseline models for the XPlainVerse challenge to be held at ACM-Multimedia-2026:
 
 1. **Qwen3-VL-8B-Instruct** (8B parameters)
 2. **InternVL3.5-14B** (14B parameters)
 
-Both models were fine-tuned using LoRA and evaluated using vLLM-accelerated inference via [ms-swift](https://github.com/modelscope/ms-swift).
+Both models were fine-tuned using LoRA and evaluated on the validation set using vLLM-accelerated inference via [ms-swift](https://github.com/modelscope/ms-swift).
 
 ### Hardware
 
@@ -84,15 +84,7 @@ The assistant response uses structured XML-like tags: `<reasoning>...</reasoning
 
 The full training set from the [XPlainVerse dataset](https://huggingface.co/datasets/Abhijeet8901/XPlainVerse) contains **450,000 samples** (130,000 real + 320,000 fake).
 
-Since the dataset is heavily imbalanced toward fake samples, we **randomly sampled 130,000 fake images** (equal to the number of real images) to create a balanced training set of **260,000 samples** (130,000 real + 130,000 fake). This prevents the model from developing a bias toward predicting "fake". The balanced dataset was shuffled with a fixed random seed (`seed=42`) for reproducibility.
-
-```python
-random.seed(42)
-if len(fake_pairs) >= len(real_pairs):
-    fake_sample = random.sample(fake_pairs, len(real_pairs))
-    balanced = real_pairs + fake_sample
-random.shuffle(balanced)
-```
+Since the dataset is heavily imbalanced toward fake samples, we **randomly sampled 130,000 fake images** (equal to the number of real images) to create a balanced training set of **260,000 samples** (130,000 real + 130,000 fake).
 
 ---
 
@@ -156,40 +148,6 @@ swift sft \
     --bf16 true \
     --output_dir ./output/qwen3-vl-8b_xplainverse
 ```
-
-### InternVL3.5-14B
-
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 \
-NPROC_PER_NODE=4 \
-swift sft \
-    --model OpenGVLab/InternVL3_5-14B \
-    --use_hf true \
-    --dataset final_training_with_perturbations_equal.jsonl \
-    --train_type lora \
-    --torch_dtype bfloat16 \
-    --num_train_epochs 1 \
-    --per_device_train_batch_size 8 \
-    --learning_rate 2e-4 \
-    --lora_rank 16 \
-    --lora_alpha 32 \
-    --target_modules all-linear \
-    --freeze_llm false \
-    --freeze_vit true \
-    --gradient_accumulation_steps 2 \
-    --max_length 2048 \
-    --max_new_tokens 2048 \
-    --warmup_ratio 0.05 \
-    --save_strategy steps \
-    --save_steps 400 \
-    --save_total_limit 100 \
-    --logging_steps 1 \
-    --dataloader_num_workers 8 \
-    --dataset_num_proc 4 \
-    --bf16 true \
-    --output_dir ./output/internvl3_5-14b_xplainverse
-```
-
 ---
 
 ## LoRA Weight Merging
@@ -203,11 +161,6 @@ swift export \
     --merge_lora true \
     --output_dir ./Qwen3-VL-8B-XPlainVerse
 
-# InternVL3.5-14B
-swift export \
-    --adapters ./output/internvl3_5-14b_xplainverse/checkpoint-4063 \
-    --merge_lora true \
-    --output_dir ./InternVL3_5-14B-XPlainVerse
 ```
 
 ---
@@ -242,20 +195,6 @@ CUDA_VISIBLE_DEVICES=0 swift infer \
     --max_batch_size 16 \
     --result_path eval_qwen_output.jsonl
 
-# InternVL3.5-14B
-CUDA_VISIBLE_DEVICES=0 swift infer \
-    --model ./InternVL3_5-14B-XPlainVerse \
-    --val_dataset val_data.jsonl \
-    --infer_backend vllm \
-    --max_new_tokens 2048 \
-    --temperature 0.0 \
-    --torch_dtype bfloat16 \
-    --stream false \
-    --use_hf true \
-    --gpu_memory_utilization 0.9 \
-    --max_model_len 4096 \
-    --max_batch_size 16 \
-    --result_path eval_internvl_output.jsonl
 ```
 
 ---
@@ -274,4 +213,8 @@ The fine-tuned model weights (LoRA merged) are available on Hugging Face:
 huggingface-cli download kartik060702/Qwen3-VL-8B-XPlainVerse --local-dir ./Qwen3-VL-8B-XPlainVerse
 huggingface-cli download kartik060702/InternVL3_5-14B-XPlainVerse --local-dir ./InternVL3_5-14B-XPlainVerse
 ```
+
+## Results
+
+
 
