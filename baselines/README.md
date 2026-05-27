@@ -27,6 +27,7 @@ The commands below use `CUDA_VISIBLE_DEVICES` for NVIDIA GPU compatibility. If y
 - [LoRA Weight Merging](#lora-weight-merging)
 - [Inference with vLLM](#inference-with-vllm)
 - [Model Weights](#model-weights)
+- [Results](#results)
 
 ---
 
@@ -216,5 +217,10 @@ huggingface-cli download kartik060702/InternVL3_5-14B-XPlainVerse --local-dir ./
 
 ## Results
 
+### Validation Set
 
+| Model | Detection F1 | Detection Accuracy | Complex BERT F1 | Simple BERT F1 | Simple SLE Norm | Simple Overall | Explanation Score |
+|-------|-------------:|-------------------:|----------------:|---------------:|----------------:|---------------:|------------------:|
+| Qwen3-VL-8B-XPlainVerse | 0.713070 | 0.749027 | 0.677412 | 0.682438 | 0.560891 | 0.645974 | 0.661693 |
+| InternVL3.5-14B-XPlainVerse | 0.624027 | 0.668991 | 0.665358 | 0.672473 | 0.563061 | 0.639649 | 0.652504 |
 
