@@ -38,7 +38,7 @@ DEFAULT_BERT_LANG = "en"
 DEFAULT_BERT_RESCALE_WITH_BASELINE = False
 DEFAULT_ID_KEYS = ("sample_id",)
 DEFAULT_COMPLEX_KEYS = ("complex_explanation",)
-DEFAULT_FACT_SCORE_MODE = "mean_entity_and_claim"
+DEFAULT_EVIDENCE_SCORE_MODE = "claim_only"
 DEFAULT_INFERENCE_BACKEND = "transformers"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-4B"
 DEFAULT_EXTRACTION_MAX_TOKENS = 1024
@@ -217,16 +217,16 @@ def _check_semantic_coverage(
     }
 
 
-def _compute_fact_score(summary: Dict[str, Any], mode: str) -> float:
+def _compute_evidence_score(summary: Dict[str, Any], mode: str) -> float:
     entity_coverage = float(summary.get("entity_coverage", 0.0))
-    claim_coverage = float(summary.get("claim_coverage", summary.get("fact_coverage", 0.0)))
+    claim_coverage = float(summary.get("claim_coverage", 0.0))
     if mode == "claim_only":
         return claim_coverage
     if mode == "entity_only":
         return entity_coverage
     if mode == "mean_entity_and_claim":
         return (entity_coverage + claim_coverage) / 2.0
-    raise ValueError(f"Unsupported fact score mode: {mode}")
+    raise ValueError(f"Unsupported evidence score mode: {mode}")
 
 
 def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
@@ -239,7 +239,7 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
         reference_id_keys=args.reference_id_keys,
     )
 
-    extraction_prompt = load_text(args.entity_fact_prompt)
+    extraction_prompt = load_text(args.entity_evidence_prompt)
     coverage_prompt = load_text(args.semantic_coverage_prompt)
     reference_cache_dir = getattr(args, "reference_cache_dir", None)
     cache_dir = Path(reference_cache_dir) if reference_cache_dir else None
@@ -335,10 +335,10 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
             )
             coverage_summary = coverage_payload["summary"]
             entity_coverage_gt_to_submission = round_float(coverage_summary.get("entity_coverage", 0.0))
-            claim_coverage_gt_to_submission = round_float(
-                coverage_summary.get("claim_coverage", coverage_summary.get("fact_coverage", 0.0))
+            claim_coverage_gt_to_submission = round_float(coverage_summary.get("claim_coverage", 0.0))
+            evidence_score_gt_to_submission = round_float(
+                _compute_evidence_score(coverage_summary, args.evidence_score_mode)
             )
-            fact_score_gt_to_submission = round_float(_compute_fact_score(coverage_summary, args.fact_score_mode))
 
             submission_payload = _extract_reference_payload(
                 sample_id=f"{sample_id}::submission",
@@ -379,11 +379,9 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
             )
             reverse_coverage_summary = reverse_coverage_payload["summary"]
             entity_coverage_submission_to_gt = round_float(reverse_coverage_summary.get("entity_coverage", 0.0))
-            claim_coverage_submission_to_gt = round_float(
-                reverse_coverage_summary.get("claim_coverage", reverse_coverage_summary.get("fact_coverage", 0.0))
-            )
-            fact_score_submission_to_gt = round_float(
-                _compute_fact_score(reverse_coverage_summary, args.fact_score_mode)
+            claim_coverage_submission_to_gt = round_float(reverse_coverage_summary.get("claim_coverage", 0.0))
+            evidence_score_submission_to_gt = round_float(
+                _compute_evidence_score(reverse_coverage_summary, args.evidence_score_mode)
             )
 
             entity_coverage = _compute_mean_if_all_present(
@@ -394,9 +392,9 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
                 claim_coverage_gt_to_submission,
                 claim_coverage_submission_to_gt,
             )
-            fact_score = _compute_mean_if_all_present(
-                fact_score_gt_to_submission,
-                fact_score_submission_to_gt,
+            evidence_score = _compute_mean_if_all_present(
+                evidence_score_gt_to_submission,
+                evidence_score_submission_to_gt,
             )
 
             result.update(
@@ -431,9 +429,9 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
                     "claim_coverage_gt_to_submission": claim_coverage_gt_to_submission,
                     "claim_coverage_submission_to_gt": claim_coverage_submission_to_gt,
                     "claim_coverage": claim_coverage,
-                    "fact_score_gt_to_submission": fact_score_gt_to_submission,
-                    "fact_score_submission_to_gt": fact_score_submission_to_gt,
-                    "fact_score": round_float(fact_score),
+                    "evidence_score_gt_to_submission": evidence_score_gt_to_submission,
+                    "evidence_score_submission_to_gt": evidence_score_submission_to_gt,
+                    "evidence_score": round_float(evidence_score),
                 }
             )
             pending_predictions.append(candidate_text)
@@ -448,7 +446,7 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
                     "bertscore_f1": None,
                     "entity_coverage": None,
                     "claim_coverage": None,
-                    "fact_score": None,
+                    "evidence_score": None,
                 }
             )
         per_sample.append(result)
@@ -480,17 +478,11 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
         item["coverage_gt_to_submission"]["summary"].get("entity_total", 0) for item in scored_samples
     )
     claim_present_total_gt_to_submission = sum(
-        item["coverage_gt_to_submission"]["summary"].get(
-            "claim_present",
-            item["coverage_gt_to_submission"]["summary"].get("fact_present", 0),
-        )
+            item["coverage_gt_to_submission"]["summary"].get("claim_present", 0)
         for item in scored_samples
     )
     claim_total_gt_to_submission = sum(
-        item["coverage_gt_to_submission"]["summary"].get(
-            "claim_total",
-            item["coverage_gt_to_submission"]["summary"].get("fact_total", 0),
-        )
+            item["coverage_gt_to_submission"]["summary"].get("claim_total", 0)
         for item in scored_samples
     )
     entity_present_total_submission_to_gt = sum(
@@ -500,20 +492,14 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
         item["coverage_submission_to_gt"]["summary"].get("entity_total", 0) for item in scored_samples
     )
     claim_present_total_submission_to_gt = sum(
-        item["coverage_submission_to_gt"]["summary"].get(
-            "claim_present",
-            item["coverage_submission_to_gt"]["summary"].get("fact_present", 0),
-        )
+            item["coverage_submission_to_gt"]["summary"].get("claim_present", 0)
         for item in scored_samples
     )
     claim_total_submission_to_gt = sum(
-        item["coverage_submission_to_gt"]["summary"].get(
-            "claim_total",
-            item["coverage_submission_to_gt"]["summary"].get("fact_total", 0),
-        )
+            item["coverage_submission_to_gt"]["summary"].get("claim_total", 0)
         for item in scored_samples
     )
-    fact_scores = [item["fact_score"] for item in scored_samples if item.get("fact_score") is not None]
+    evidence_scores = [item["evidence_score"] for item in scored_samples if item.get("evidence_score") is not None]
 
     summary = {
         "sample_count": len(per_sample),
@@ -542,7 +528,7 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
         "entity_coverage_micro_submission_to_gt": round_float(entity_present_total_submission_to_gt / entity_total_submission_to_gt) if entity_total_submission_to_gt else 0.0,
         "claim_coverage_micro_gt_to_submission": round_float(claim_present_total_gt_to_submission / claim_total_gt_to_submission) if claim_total_gt_to_submission else 0.0,
         "claim_coverage_micro_submission_to_gt": round_float(claim_present_total_submission_to_gt / claim_total_submission_to_gt) if claim_total_submission_to_gt else 0.0,
-        "fact_score_mean": round_float(sum(float(score) for score in fact_scores) / len(fact_scores)) if fact_scores else None,
+        "evidence_score_mean": round_float(sum(float(score) for score in evidence_scores) / len(evidence_scores)) if evidence_scores else None,
     }
 
     report = build_base_report(
@@ -559,10 +545,10 @@ def evaluate_complex_submission(args: argparse.Namespace) -> Dict[str, Any]:
             "bertscore_model_type": args.bertscore_model_type,
             "bertscore_lang": args.bertscore_lang,
             "bertscore_rescale_with_baseline": args.bertscore_rescale_with_baseline,
-            "fact_score_mode": args.fact_score_mode,
+            "evidence_score_mode": args.evidence_score_mode,
             "backend": args.backend,
             "model_name": args.model_name,
-            "entity_fact_prompt": str(args.entity_fact_prompt),
+            "entity_evidence_prompt": str(args.entity_evidence_prompt),
             "semantic_coverage_prompt": str(args.semantic_coverage_prompt),
         },
         diagnostics=diagnostics,
@@ -580,13 +566,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--submission-complex-keys", nargs="+", default=list(DEFAULT_COMPLEX_KEYS))
     parser.add_argument("--reference-complex-keys", nargs="+", default=list(DEFAULT_COMPLEX_KEYS))
     parser.add_argument("--reference-cache-dir", default=None, help="Optional folder for cached extracted reference entities/claims.")
-    parser.add_argument("--entity-fact-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "entity_fact_extraction_prompt.txt")
+    parser.add_argument("--entity-evidence-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "entity_evidence_extraction_prompt.txt")
     parser.add_argument("--semantic-coverage-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "semantic_coverage_prompt.txt")
     parser.add_argument("--bertscore-model-type", default=DEFAULT_BERT_MODEL_TYPE)
     parser.add_argument("--bertscore-lang", default=DEFAULT_BERT_LANG)
     parser.add_argument("--bertscore-rescale-with-baseline", action="store_true", default=DEFAULT_BERT_RESCALE_WITH_BASELINE)
     parser.add_argument("--bertscore-batch-size", type=int, default=8)
-    parser.add_argument("--fact-score-mode", choices=["mean_entity_and_claim", "claim_only", "entity_only"], default=DEFAULT_FACT_SCORE_MODE)
+    parser.add_argument("--evidence-score-mode", choices=["mean_entity_and_claim", "claim_only", "entity_only"], default=DEFAULT_EVIDENCE_SCORE_MODE)
     parser.add_argument("--backend", choices=["transformers", "openai_compatible"], default=DEFAULT_INFERENCE_BACKEND)
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--base-url", default="http://localhost:8000/v1")

@@ -967,7 +967,7 @@ def get_reference_claims(payload):
             "the outer JSON object was truncated and only an inner list parsed."
             .format(type(payload).__name__)
         )
-    return payload.get("evidence_claims", payload.get("atomic_facts", []))
+    return payload.get("evidence_claims", [])
 
 
 def get_coverage_entity_matches(payload):
@@ -985,10 +985,7 @@ def get_coverage_claim_matches(payload):
             "Expected coverage JSON object but got {0}."
             .format(type(payload).__name__)
         )
-    return payload.get(
-        "claim_matches",
-        payload.get("claim_results", payload.get("fact_results", [])),
-    )
+    return payload.get("claim_matches", payload.get("claim_results", []))
 
 
 def compute_coverage_summary(entity_results, claim_results):
@@ -1004,7 +1001,4 @@ def compute_coverage_summary(entity_results, claim_results):
         "claim_present": claim_present,
         "claim_coverage": float(claim_present) / claim_total if claim_total else 0.0,
     }
-    summary["fact_total"] = summary["claim_total"]
-    summary["fact_present"] = summary["claim_present"]
-    summary["fact_coverage"] = summary["claim_coverage"]
     return summary

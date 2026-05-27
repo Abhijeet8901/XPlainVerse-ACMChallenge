@@ -12,30 +12,33 @@ def _read_json(path: str | Path) -> Dict[str, Any]:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def _normalize_sle(value: float) -> float:
+    clipped = max(-1.0, min(4.0, float(value)))
+    return (clipped + 1.0) / 5.0
+
+
 def build_combined_report(complex_report: Dict[str, Any], simple_report: Dict[str, Any]) -> Dict[str, Any]:
     complex_bert = float(complex_report.get("summary", {}).get("bertscore_f1_mean") or 0.0)
-    complex_fact = float(complex_report.get("summary", {}).get("fact_score_mean") or 0.0)
     simple_bert = float(simple_report.get("summary", {}).get("bertscore_f1_mean") or 0.0)
-    simple_simplicity = float(simple_report.get("summary", {}).get("simplicity_score_mean") or 0.0)
+    simple_sle_raw = float(simple_report.get("summary", {}).get("simplicity_score_mean") or 0.0)
 
-    complex_score = complex_bert + complex_fact
-    simple_score = simple_bert + simple_simplicity
-    total_score = complex_score + simple_score
+    simple_sle_normalized = _normalize_sle(simple_sle_raw)
+    simple_overall = (0.7 * simple_bert) + (0.3 * simple_sle_normalized)
+    explanation_score = (complex_bert + simple_overall) / 2.0
 
     return {
         "created_at_utc": utc_now_iso(),
         "summary": {
             "complex_bertscore_f1_mean": round_float(complex_bert),
-            "complex_fact_score_mean": round_float(complex_fact),
             "simple_bertscore_f1_mean": round_float(simple_bert),
-            "simple_simplicity_score_mean": round_float(simple_simplicity),
-            "complex_score": round_float(complex_score),
-            "simple_score": round_float(simple_score),
-            "total_score": round_float(total_score),
+            "simple_sle_score_mean": round_float(simple_sle_raw),
+            "simple_sle_normalized": round_float(simple_sle_normalized),
+            "simple_overall_score": round_float(simple_overall),
+            "explanation_score": round_float(explanation_score),
         },
         "notes": [
-            "This script currently uses plain addition.",
-            "Edit this file later if you decide to change weighting, normalization, or leaderboard-specific aggregation.",
+            "Simple overall is 0.7 * simple BERT F1 + 0.3 * normalized SLE.",
+            "Explanation score is the mean of complex BERT F1 and simple overall score.",
         ],
     }
 

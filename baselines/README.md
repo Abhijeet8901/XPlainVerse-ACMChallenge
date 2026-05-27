@@ -1,6 +1,6 @@
-# Baselines for XPlainVerse ACM Challenge
+# Baselines for the Explainable Deepfake Detection Challenge
 
-This document describes how we set up, fine-tuned, and evaluated two baseline models for the XPlainVerse challenge to be held at ACM-Multimedia-2026:
+This document describes how we set up, fine-tuned, and evaluated two baseline models on XPlainVerse for the Explainable Deepfake Detection Challenge:
 
 1. **Qwen3-VL-8B-Instruct** (8B parameters)
 2. **InternVL3.5-14B** (14B parameters)
@@ -224,3 +224,7 @@ huggingface-cli download kartik060702/InternVL3_5-14B-XPlainVerse --local-dir ./
 | Qwen3-VL-8B-XPlainVerse | 0.713070 | 0.749027 | 0.677412 | 0.682438 | 0.560891 | 0.645974 | 0.661693 |
 | InternVL3.5-14B-XPlainVerse | 0.624027 | 0.668991 | 0.665358 | 0.672473 | 0.563061 | 0.639649 | 0.652504 |
 
+`Simple Overall` is computed as `0.7 * Simple BERT F1 + 0.3 * Simple SLE Norm`.
+`Explanation Score` is computed as `(Complex BERT F1 + Simple Overall) / 2`.
+
+These validation results use complex BERT F1 for the complex explanation score. The optional LLM-based entity and evidence metrics in the evaluation code are retained for additional analysis, but they are not included in the baseline table above.

@@ -37,6 +37,7 @@ DEFAULT_QWEN_BATCH_SIZE = 4
 DEFAULT_BERT_BATCH_SIZE = 8
 DEFAULT_SLE_BATCH_SIZE = 16
 DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "data" / "val_ground_truth.jsonl"
+DEFAULT_LABEL_KEYS = ("label", "pred_label", "predicted_label")
 
 
 def _write_progress_message(iterator, message):
@@ -77,13 +78,13 @@ def _clip(value, lower, upper):
     return max(lower, min(upper, value))
 
 
-def _compute_complex_overall_score(complex_bert_f1, complex_entity_f1, complex_facts_f1):
-    if any(value is None for value in (complex_bert_f1, complex_entity_f1, complex_facts_f1)):
+def _compute_complex_overall_score(complex_bert_f1, complex_entity_f1, complex_evidence_f1):
+    if any(value is None for value in (complex_bert_f1, complex_entity_f1, complex_evidence_f1)):
         return None
     return round_float(
         0.3 * float(complex_bert_f1)
         + 0.4 * float(complex_entity_f1)
-        + 0.3 * float(complex_facts_f1)
+        + 0.3 * float(complex_evidence_f1)
     )
 
 
@@ -101,16 +102,70 @@ def _compute_simple_overall_score(simple_bert_f1, simple_sle_score):
     return round_float(0.7 * float(simple_bert_f1) + 0.3 * float(simple_sle_norm))
 
 
+def _compute_explanation_score(complex_bert_f1, simple_overall_score):
+    if complex_bert_f1 is None or simple_overall_score is None:
+        return None
+    return round_float((float(complex_bert_f1) + float(simple_overall_score)) / 2.0)
+
+
+def _normalize_label(value):
+    if value is None:
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "real"}:
+        return "real"
+    if normalized in {"1", "fake"}:
+        return "fake"
+    return None
+
+
+def _compute_detection_f1(rows):
+    true_positive = 0
+    false_positive = 0
+    false_negative = 0
+    seen_label = False
+    for row in rows:
+        predicted_label = row.get("predicted_label")
+        ground_truth_label = row.get("ground_truth_label")
+        if ground_truth_label is None:
+            continue
+        seen_label = True
+        if predicted_label == "fake" and ground_truth_label == "fake":
+            true_positive += 1
+        elif predicted_label == "fake" and ground_truth_label == "real":
+            false_positive += 1
+        elif ground_truth_label == "fake":
+            false_negative += 1
+    if not seen_label:
+        return None
+    denominator = (2 * true_positive) + false_positive + false_negative
+    if denominator == 0:
+        return 0.0
+    return round_float((2 * true_positive) / denominator)
+
+
 def _build_final_scores(rows):
+    complex_bert_f1 = _compute_mean(item.get("complex_bert_f1") for item in rows)
+    simple_sle_score = _compute_mean(item.get("simple_sle_score") for item in rows)
+    simple_sle_normalized = _compute_mean(item.get("simple_sle_normalized") for item in rows)
+    if simple_sle_normalized is None:
+        simple_sle_normalized = _normalize_simple_sle(simple_sle_score)
+    simple_overall_score = _compute_mean(item.get("simple_overall_score") for item in rows)
+    explanation_score = _compute_explanation_score(complex_bert_f1, simple_overall_score)
     return {
         "samples_completed": len(rows),
-        "complex_bert_f1": _compute_mean(item.get("complex_bert_f1") for item in rows),
+        "detection_f1": _compute_detection_f1(rows),
+        "detection_accuracy": _compute_mean(item.get("label_correct") for item in rows),
+        "accuracy": _compute_mean(item.get("label_correct") for item in rows),
+        "complex_bert_f1": complex_bert_f1,
         "complex_entity_f1": _compute_mean(item.get("complex_entity_f1") for item in rows),
-        "complex_facts_f1": _compute_mean(item.get("complex_facts_f1") for item in rows),
+        "complex_evidence_f1": _compute_mean(item.get("complex_evidence_f1") for item in rows),
         "complex_overall_score": _compute_mean(item.get("complex_overall_score") for item in rows),
         "simple_bert_f1": _compute_mean(item.get("simple_bert_f1") for item in rows),
-        "simple_sle_score": _compute_mean(item.get("simple_sle_score") for item in rows),
-        "simple_overall_score": _compute_mean(item.get("simple_overall_score") for item in rows),
+        "simple_sle_score": simple_sle_score,
+        "simple_sle_normalized": simple_sle_normalized,
+        "simple_overall_score": simple_overall_score,
+        "explanation_score": explanation_score,
     }
 
 
@@ -259,9 +314,12 @@ def _prepare_rows(aligned_rows, args, show_progress):
     for sample_id, submission_row, reference_row in sample_iterator:
         row: Dict[str, Any] = {
             "sample_id": sample_id,
+            "predicted_label": None,
+            "ground_truth_label": None,
+            "label_correct": None,
             "complex_bert_f1": None,
             "complex_entity_f1": None,
-            "complex_facts_f1": None,
+            "complex_evidence_f1": None,
             "complex_overall_score": None,
             "simple_bert_f1": None,
             "simple_sle_score": None,
@@ -273,10 +331,43 @@ def _prepare_rows(aligned_rows, args, show_progress):
             "_gt_extraction": None,
             "_pred_extraction": None,
             "_gt_to_pred_entity": None,
-            "_gt_to_pred_fact": None,
+            "_gt_to_pred_evidence": None,
             "_pred_to_gt_entity": None,
-            "_pred_to_gt_fact": None,
+            "_pred_to_gt_evidence": None,
         }
+
+        normalized_reference_label = None
+        try:
+            reference_label, _ = extract_required_text(
+                reference_row,
+                args.reference_label_keys,
+                field_role="reference label",
+                sample_id=sample_id,
+            )
+            normalized_reference_label = _normalize_label(reference_label)
+            row["ground_truth_label"] = normalized_reference_label
+        except Exception as exc:
+            _write_progress_message(
+                sample_iterator,
+                "Warning: reference label preparation failed for {0}: {1}".format(sample_id, exc),
+            )
+
+        try:
+            submission_label, _ = extract_required_text(
+                submission_row,
+                args.submission_label_keys,
+                field_role="submission label",
+                sample_id=sample_id,
+            )
+            normalized_submission_label = _normalize_label(submission_label)
+            row["predicted_label"] = normalized_submission_label
+        except Exception as exc:
+            _write_progress_message(
+                sample_iterator,
+                "Warning: submission label preparation failed for {0}: {1}".format(sample_id, exc),
+            )
+        if normalized_reference_label is not None:
+            row["label_correct"] = row.get("predicted_label") == normalized_reference_label
 
         try:
             row["_submission_complex_text"], _ = extract_required_text(
@@ -400,7 +491,7 @@ def _run_coverage_stage(
     reference_payload_key,
     candidate_text_key,
     entity_output_key,
-    fact_output_key,
+    evidence_output_key,
     prompt_template,
     args,
     desc,
@@ -470,9 +561,7 @@ def _run_coverage_stage(
             try:
                 summary = _parse_coverage_summary(rows[index]["sample_id"], raw_response)
                 rows[index][entity_output_key] = round_float(summary.get("entity_coverage", 0.0))
-                rows[index][fact_output_key] = round_float(
-                    summary.get("claim_coverage", summary.get("fact_coverage", 0.0))
-                )
+                rows[index][evidence_output_key] = round_float(summary.get("claim_coverage", 0.0))
             except Exception as exc:
                 _write_progress_message(
                     batch_iterator,
@@ -541,29 +630,39 @@ def _finalize_rows(rows):
             row.get("_pred_to_gt_entity"),
             row.get("_gt_to_pred_entity"),
         )
-        row["complex_facts_f1"] = _compute_harmonic_mean_if_all_present(
-            row.get("_pred_to_gt_fact"),
-            row.get("_gt_to_pred_fact"),
+        row["complex_evidence_f1"] = _compute_harmonic_mean_if_all_present(
+            row.get("_pred_to_gt_evidence"),
+            row.get("_gt_to_pred_evidence"),
         )
         row["complex_overall_score"] = _compute_complex_overall_score(
             row.get("complex_bert_f1"),
             row.get("complex_entity_f1"),
-            row.get("complex_facts_f1"),
+            row.get("complex_evidence_f1"),
         )
         row["simple_overall_score"] = _compute_simple_overall_score(
             row.get("simple_bert_f1"),
             row.get("simple_sle_score"),
         )
+        row["simple_sle_normalized"] = _normalize_simple_sle(row.get("simple_sle_score"))
+        row["explanation_score"] = _compute_explanation_score(
+            row.get("complex_bert_f1"),
+            row.get("simple_overall_score"),
+        )
         finalized_rows.append(
             {
                 "sample_id": row["sample_id"],
+                "predicted_label": row.get("predicted_label"),
+                "ground_truth_label": row.get("ground_truth_label"),
+                "label_correct": row.get("label_correct"),
                 "complex_bert_f1": row.get("complex_bert_f1"),
                 "complex_entity_f1": row.get("complex_entity_f1"),
-                "complex_facts_f1": row.get("complex_facts_f1"),
+                "complex_evidence_f1": row.get("complex_evidence_f1"),
                 "complex_overall_score": row.get("complex_overall_score"),
                 "simple_bert_f1": row.get("simple_bert_f1"),
                 "simple_sle_score": row.get("simple_sle_score"),
+                "simple_sle_normalized": row.get("simple_sle_normalized"),
                 "simple_overall_score": row.get("simple_overall_score"),
+                "explanation_score": row.get("explanation_score"),
             }
         )
     return finalized_rows
@@ -579,12 +678,14 @@ def main() -> None:
 
     parser.add_argument("--submission-id-keys", nargs="+", default=["sample_id"])
     parser.add_argument("--reference-id-keys", nargs="+", default=["sample_id"])
+    parser.add_argument("--submission-label-keys", nargs="+", default=list(DEFAULT_LABEL_KEYS))
+    parser.add_argument("--reference-label-keys", nargs="+", default=["label"])
     parser.add_argument("--submission-complex-keys", nargs="+", default=["complex_explanation"])
     parser.add_argument("--reference-complex-keys", nargs="+", default=["complex_explanation"])
     parser.add_argument("--submission-simple-keys", nargs="+", default=["simple_explanation"])
     parser.add_argument("--reference-simple-keys", nargs="+", default=["simple_explanation"])
 
-    parser.add_argument("--entity-fact-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "entity_fact_extraction_prompt.txt")
+    parser.add_argument("--entity-evidence-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "entity_evidence_extraction_prompt.txt")
     parser.add_argument("--semantic-coverage-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "semantic_coverage_prompt.txt")
 
     parser.add_argument("--bertscore-model-type", default="microsoft/deberta-xlarge-mnli")
@@ -641,7 +742,7 @@ def main() -> None:
     if args.skip_qwen:
         print("Skipping Qwen extraction and coverage. Qwen-based complex metrics will be written as null.")
     else:
-        extraction_prompt = load_text(args.entity_fact_prompt)
+        extraction_prompt = load_text(args.entity_evidence_prompt)
         coverage_prompt = load_text(args.semantic_coverage_prompt)
 
         if args.preload_models and args.backend == "transformers":
@@ -679,7 +780,7 @@ def main() -> None:
             reference_payload_key="_gt_extraction",
             candidate_text_key="_submission_complex_text",
             entity_output_key="_gt_to_pred_entity",
-            fact_output_key="_gt_to_pred_fact",
+            evidence_output_key="_gt_to_pred_evidence",
             prompt_template=coverage_prompt,
             args=args,
             desc="Qwen coverage gt->pred",
@@ -690,7 +791,7 @@ def main() -> None:
             reference_payload_key="_pred_extraction",
             candidate_text_key="_reference_complex_text",
             entity_output_key="_pred_to_gt_entity",
-            fact_output_key="_pred_to_gt_fact",
+            evidence_output_key="_pred_to_gt_evidence",
             prompt_template=coverage_prompt,
             args=args,
             desc="Qwen coverage pred->gt",

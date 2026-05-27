@@ -11,7 +11,7 @@ Given an explanation of why an image looks fake or real, extract only:
 
 Important:
 Do NOT extract all entities mentioned in the explanation.
-Do NOT extract all factual statements.
+Do NOT extract all descriptive statements.
 Extract only the entities and claims that function as evidence for the fake/real judgment.
 
 Definitions:
@@ -24,7 +24,7 @@ A compact, checkable claim about a diagnostic entity that directly supports the 
 
 What to exclude:
 - entities mentioned only for context
-- descriptive facts that do not support the fake/real reasoning
+- descriptive statements that do not support the fake/real reasoning
 - generic conclusions such as "the image looks fake" or "the image looks real"
 - identity, location, color, or presence details unless they are themselves part of the evidence
 
