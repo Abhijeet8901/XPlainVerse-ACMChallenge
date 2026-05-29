@@ -81,6 +81,10 @@ When submitting to the Explainable Deepfake Detection Challenge platform, submit
 
 Do not put the files inside an extra top-level folder.
 
+Official final-test submissions are handled on CodaBench:
+
+https://www.codabench.org/competitions/16461/
+
 `detection.jsonl` should contain one row for every final-test image:
 
 ```json
@@ -166,6 +170,7 @@ With `--skip-qwen`, the evaluator still computes:
 - simple SLE normalized
 - simple overall score
 - explanation score
+- overall score
 
 and writes optional Qwen-dependent complex diagnostic fields as `null`:
 
@@ -194,6 +199,7 @@ The main evaluator writes:
 - `simple_sle_normalized`
 - `simple_overall_score`
 - `explanation_score`
+- `overall_score`
 
 ## Scoring
 
@@ -223,11 +229,19 @@ Explanation score:
 explanation_score = (complex_bert_f1 + simple_overall_score) / 2
 ```
 
+Overall score:
+
+```text
+overall_score = (detection_f1 + explanation_score) / 2
+```
+
 For the Explainable Deepfake Detection Challenge, the primary explanation score uses:
 
 - `complex_bert_f1` on the 10,000-sample explanation-evaluation subset
 - `simple_overall_score` on the same explanation-evaluation subset
 - `explanation_score = (complex_bert_f1 + simple_overall_score) / 2`
+
+The challenge leaderboard is sorted by `overall_score`, which combines detection and explanation performance.
 
 The challenge leaderboard does not use the optional LLM-based `complex_entity_f1` and `complex_evidence_f1` metrics for all submissions. For the top 5 teams, organizers will additionally compute `complex_entity_f1` and `complex_evidence_f1` for final reporting and analysis.
 

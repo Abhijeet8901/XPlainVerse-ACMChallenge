@@ -108,6 +108,12 @@ def _compute_explanation_score(complex_bert_f1, simple_overall_score):
     return round_float((float(complex_bert_f1) + float(simple_overall_score)) / 2.0)
 
 
+def _compute_overall_score(detection_f1, explanation_score):
+    if detection_f1 is None or explanation_score is None:
+        return None
+    return round_float((float(detection_f1) + float(explanation_score)) / 2.0)
+
+
 def _normalize_label(value):
     if value is None:
         return None
@@ -152,9 +158,11 @@ def _build_final_scores(rows):
         simple_sle_normalized = _normalize_simple_sle(simple_sle_score)
     simple_overall_score = _compute_mean(item.get("simple_overall_score") for item in rows)
     explanation_score = _compute_explanation_score(complex_bert_f1, simple_overall_score)
+    detection_f1 = _compute_detection_f1(rows)
+    overall_score = _compute_overall_score(detection_f1, explanation_score)
     return {
         "samples_completed": len(rows),
-        "detection_f1": _compute_detection_f1(rows),
+        "detection_f1": detection_f1,
         "detection_accuracy": _compute_mean(item.get("label_correct") for item in rows),
         "accuracy": _compute_mean(item.get("label_correct") for item in rows),
         "complex_bert_f1": complex_bert_f1,
@@ -166,6 +174,7 @@ def _build_final_scores(rows):
         "simple_sle_normalized": simple_sle_normalized,
         "simple_overall_score": simple_overall_score,
         "explanation_score": explanation_score,
+        "overall_score": overall_score,
     }
 
 
