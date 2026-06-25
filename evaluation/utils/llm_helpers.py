@@ -141,6 +141,9 @@ def chat_completion(
             enable_thinking=enable_thinking,
         )
 
+    if backend == "vllm":
+        backend = "openai_compatible"
+
     if backend != "openai_compatible":
         raise ValueError("Unsupported inference backend: {0}".format(backend))
 

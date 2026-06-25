@@ -36,14 +36,14 @@ DEFAULT_SYSTEM_PROMPT_COVERAGE = "You are a careful semantic coverage assistant.
 DEFAULT_BERT_MODEL_TYPE = "microsoft/deberta-xlarge-mnli"
 DEFAULT_BERT_LANG = "en"
 DEFAULT_BERT_RESCALE_WITH_BASELINE = False
-DEFAULT_ID_KEYS = ("sample_id",)
+DEFAULT_ID_KEYS = ("sample_id", "id")
 DEFAULT_COMPLEX_KEYS = ("complex_explanation",)
 DEFAULT_EVIDENCE_SCORE_MODE = "claim_only"
 DEFAULT_INFERENCE_BACKEND = "transformers"
 DEFAULT_MODEL_NAME = "Qwen/Qwen3.5-4B"
 DEFAULT_EXTRACTION_MAX_TOKENS = 1024
 DEFAULT_COVERAGE_MAX_TOKENS = 1024
-DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "data" / "val_ground_truth.jsonl"
+DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "ground_truth" / "val" / "reference.jsonl"
 
 
 def _compute_mean_if_all_present(*values: float | None) -> float | None:
@@ -573,7 +573,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bertscore-rescale-with-baseline", action="store_true", default=DEFAULT_BERT_RESCALE_WITH_BASELINE)
     parser.add_argument("--bertscore-batch-size", type=int, default=8)
     parser.add_argument("--evidence-score-mode", choices=["mean_entity_and_claim", "claim_only", "entity_only"], default=DEFAULT_EVIDENCE_SCORE_MODE)
-    parser.add_argument("--backend", choices=["transformers", "openai_compatible"], default=DEFAULT_INFERENCE_BACKEND)
+    parser.add_argument("--backend", choices=["transformers", "openai_compatible", "vllm"], default=DEFAULT_INFERENCE_BACKEND)
     parser.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--api-key", default=None)

@@ -11,17 +11,17 @@ The evaluation covers three outputs:
 ## Repository Structure
 
 - `evaluation/evaluate_val.py`
-  Main reference-based evaluator for JSONL prediction files.
+  Main evaluator for the challenge three-file submission format.
 - `evaluation/evaluate_complex_explanations.py`
   Standalone complex-explanation evaluator.
 - `evaluation/evaluate_simple_explanations.py`
   Standalone simple-explanation evaluator.
 - `evaluation/combine_explanation_scores.py`
   Helper for combining standalone complex and simple explanation reports.
-- `evaluation/data/val_ground_truth.jsonl`
-  Validation reference file.
+- `evaluation/ground_truth/`
+  Split-specific reference folders with `reference.jsonl` and precomputed GT entity/fact caches.
 - `evaluation/prompts/`
-  Prompt templates used by optional LLM-based complex diagnostic metrics.
+  Prompt templates used by the LLM-based grounding metrics.
 - `evaluation/utils/`
   Shared loading, batching, and scoring helpers.
 - `evaluation/env/`
@@ -31,55 +31,27 @@ The evaluation covers three outputs:
 
 ## Reference Data
 
-`evaluation/data/val_ground_truth.jsonl` contains the released validation labels and reference explanations in the format expected by the evaluator. This lets participants reproduce validation metrics without converting the dataset into a separate reference file.
+`evaluation/ground_truth/` provides split folders:
 
-Hidden final-test labels and reference explanations are not included in this repository.
+- `evaluation/ground_truth/val/`
+- `evaluation/ground_truth/test/`
+
+Each folder is expected to contain:
+
+- `reference.jsonl`
+- `complex_ground_truth_entity_facts.jsonl`
+
+When a GT entity/fact cache is available, the evaluator uses it automatically and skips recomputing ground-truth entity/fact extraction for matching rows. Missing cache rows are computed only if the Qwen/vLLM stages run; the cache is updated unless `--no-update-gt-entity-facts` is passed.
+
+Hidden final-test labels and reference explanations should not be included in a public release. For local/private evaluation, `evaluation/ground_truth/test/` may be populated with the hidden final-test reference and cache.
 
 ## Evaluator Input Format
 
-For reference-based metric evaluation with `evaluation/evaluate_val.py`, use one JSONL file. Each row should contain the sample id, a predicted label, and both explanations:
-
-```json
-{
-  "sample_id": "000001",
-  "label": "fake",
-  "complex_explanation": "A detailed explanation grounded in visible image evidence.",
-  "simple_explanation": "A short explanation with the key reason."
-}
-```
-
-The evaluator accepts either string labels:
-
-- `real`
-- `fake`
-
-or numeric `pred_label` values:
-
-- `0` for real
-- `1` for fake
-
-For example:
-
-```json
-{
-  "sample_id": "000001",
-  "pred_label": 1,
-  "complex_explanation": "...",
-  "simple_explanation": "..."
-}
-```
-
-Rows are aligned by `sample_id` against the provided reference file.
-
-## Challenge Submission Format
-
-When submitting to the Explainable Deepfake Detection Challenge platform, submit a zip file containing these three files at the zip root:
+`evaluation/evaluate_val.py` accepts the official challenge format only: either a zip file or the extracted folder containing these three JSONL files:
 
 - `detection.jsonl`
 - `complex.jsonl`
 - `simple.jsonl`
-
-Do not put the files inside an extra top-level folder.
 
 Official final-test submissions are handled on CodaBench:
 
@@ -96,19 +68,19 @@ https://www.codabench.org/competitions/16461/
 - `0` for real
 - `1` for fake
 
-`complex.jsonl` should contain complex explanations for the explanation-evaluation subset:
+`complex.jsonl` should contain complex explanations for each evaluated image:
 
 ```json
 {"id": "sample1.png", "complex_explanation": "A detailed explanation grounded in visible image evidence."}
 ```
 
-`simple.jsonl` should contain simple explanations for the same explanation-evaluation subset:
+`simple.jsonl` should contain simple explanations for each evaluated image:
 
 ```json
 {"id": "sample1.png", "simple_explanation": "A simple explanation for the image."}
 ```
 
-The `id` value must exactly match the released test image filename, including extension.
+The `id` value should match the reference id. The local evaluator accepts common filename aliases, such as full paths or ids with/without image extensions, when they resolve unambiguously.
 
 Example zip command:
 
@@ -126,7 +98,7 @@ conda env create -f env/xplainverse_eval_env.yml
 conda activate xplainverse_eval_full
 ```
 
-The environment file installs Python, PyTorch, `transformers`, BERTScore, and the SLE dependencies used by the evaluator.
+The environment file installs Python, PyTorch, `transformers`, BERTScore, and the SLE dependencies used by the evaluator. The LLM-judge stages can run through a vLLM OpenAI-compatible server by using `--backend vllm`.
 
 ## Running Evaluation
 
@@ -134,49 +106,92 @@ From inside `evaluation/`:
 
 ```bash
 python evaluate_val.py \
-  --submission /path/to/submission.jsonl \
+  --submission /path/to/submission.zip \
+  --output-dir /path/to/results
+```
+
+You can also pass the extracted submission folder:
+
+```bash
+python evaluate_val.py \
+  --submission /path/to/submission_folder \
   --output-dir /path/to/results
 ```
 
 By default, the evaluator uses:
 
-- `evaluation/data/val_ground_truth.jsonl`
+- `evaluation/ground_truth/val/reference.jsonl`
+- `evaluation/ground_truth/val/complex_ground_truth_entity_facts.jsonl`
 
-You can override the reference file if needed:
+You can choose a bundled split:
 
 ```bash
 python evaluate_val.py \
-  --submission /path/to/submission.jsonl \
-  --ground-truth /path/to/ground_truth.jsonl \
+  --submission /path/to/submission.zip \
+  --ground-truth-split test \
   --output-dir /path/to/results
 ```
 
-To skip optional LLM-based complex diagnostic metrics:
+You can also pass a custom folder:
 
 ```bash
 python evaluate_val.py \
-  --submission /path/to/submission.jsonl \
+  --submission /path/to/submission.zip \
+  --ground-truth-dir /path/to/ground_truth_folder \
+  --output-dir /path/to/results
+```
+
+Or override the reference/cache files directly:
+
+```bash
+python evaluate_val.py \
+  --submission /path/to/submission.zip \
+  --ground-truth /path/to/reference.jsonl \
+  --gt-entity-facts /path/to/complex_ground_truth_entity_facts.jsonl \
+  --output-dir /path/to/results
+```
+
+### vLLM Judge Backend
+
+The official/recommended path for the LLM grounding stages is a vLLM OpenAI-compatible server. Start the server in a GPU environment, then point the evaluator at it:
+
+```bash
+vllm serve Qwen/Qwen3.5-4B \
+  --host 0.0.0.0 \
+  --port 8000
+```
+
+```bash
+python evaluate_val.py \
+  --submission /path/to/submission.zip \
+  --output-dir /path/to/results \
+  --backend vllm \
+  --base-url http://localhost:8000/v1 \
+  --model-name Qwen/Qwen3.5-4B
+```
+
+`--backend openai_compatible` is equivalent if you already use that naming. `--backend transformers` remains available for local in-process model loading.
+
+To skip LLM-based grounding metrics for a faster debug run:
+
+```bash
+python evaluate_val.py \
+  --submission /path/to/submission.zip \
   --output-dir /path/to/results \
   --skip-qwen
 ```
 
 With `--skip-qwen`, the evaluator still computes:
 
-- detection F1
+- detection macro F1
 - detection accuracy
 - complex BERT F1
 - simple BERT F1
 - simple SLE score
 - simple SLE normalized
 - simple overall score
-- explanation score
-- overall score
 
-and writes optional Qwen-dependent complex diagnostic fields as `null`:
-
-- `complex_entity_f1`
-- `complex_evidence_f1`
-- `complex_overall_score`
+The paper-style final score still includes the LLM grounding term, so skipped or missing grounding scores contribute zero to that final aggregate. Use `--skip-qwen` for debugging, not final ranking.
 
 ## Output Files
 
@@ -189,7 +204,9 @@ The main evaluator writes:
 
 `final_scores.json` contains dataset-level means, including:
 
-- `detection_f1`
+- `detection_macro_f1`
+- `detection_fake_f1`
+- `detection_real_f1`
 - `detection_accuracy`
 - `complex_bert_f1`
 - `complex_entity_f1`
@@ -198,17 +215,26 @@ The main evaluator writes:
 - `simple_sle_score`
 - `simple_sle_normalized`
 - `simple_overall_score`
+- `reference_explanation_score`
+- `grounding_score`
 - `explanation_score`
+- `final_score`
 - `overall_score`
 
 ## Scoring
 
-Detection F1 treats `fake` as the positive class.
+The evaluator uses the ACM MM 2026 paper scoring protocol.
 
-Detection accuracy:
+Detection macro F1 averages the fake-positive and real-positive F1 scores:
 
 ```text
-correct_labels / total_aligned_samples
+detection_macro_f1 = (detection_fake_f1 + detection_real_f1) / 2
+```
+
+Detection accuracy is reported for reference:
+
+```text
+detection_accuracy = correct_labels / total_reference_samples
 ```
 
 Simple SLE normalization:
@@ -223,27 +249,37 @@ Simple overall:
 simple_overall_score = 0.7 * simple_bert_f1 + 0.3 * simple_sle_normalized
 ```
 
-Explanation score:
+The complex explanation score is the complex BERTScore-F1:
 
 ```text
-explanation_score = (complex_bert_f1 + simple_overall_score) / 2
+complex_explanation_score = complex_bert_f1
 ```
 
-Overall score:
+The reference-based explanation subscore is:
 
 ```text
-overall_score = (detection_f1 + explanation_score) / 2
+reference_explanation_score = (complex_explanation_score + simple_overall_score) / 2
 ```
 
-For the Explainable Deepfake Detection Challenge, the primary explanation score uses:
+The LLM grounding subscore is:
 
-- `complex_bert_f1` on the 10,000-sample explanation-evaluation subset
-- `simple_overall_score` on the same explanation-evaluation subset
-- `explanation_score = (complex_bert_f1 + simple_overall_score) / 2`
+```text
+grounding_score = (complex_entity_f1 + complex_evidence_f1) / 2
+```
 
-The challenge leaderboard is sorted by `overall_score`, which combines detection and explanation performance.
+The final explanation score weights reference similarity and LLM grounding as described in the paper:
 
-The challenge leaderboard does not use the optional LLM-based `complex_entity_f1` and `complex_evidence_f1` metrics for all submissions. For the top 5 teams, organizers will additionally compute `complex_entity_f1` and `complex_evidence_f1` for final reporting and analysis.
+```text
+explanation_score = 0.4 * reference_explanation_score + 0.6 * grounding_score
+```
+
+The final challenge score is:
+
+```text
+final_score = overall_score = (detection_macro_f1 + explanation_score) / 2
+```
+
+Missing rows or failed metric rows contribute zero to dataset-level metric means, so the denominator remains the number of reference samples.
 
 ## Baseline Results
 

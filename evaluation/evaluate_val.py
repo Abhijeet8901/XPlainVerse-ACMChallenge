@@ -2,12 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import zipfile
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from pathlib import PurePosixPath
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from utils.challenge_eval_utils import (
     align_submission_and_reference,
+    compute_hash,
     extract_required_text,
+    get_first_present,
     read_jsonl,
     round_float,
     write_json,
@@ -36,8 +40,32 @@ DEFAULT_SYSTEM_PROMPT_COVERAGE = "You are a careful semantic coverage assistant.
 DEFAULT_QWEN_BATCH_SIZE = 4
 DEFAULT_BERT_BATCH_SIZE = 8
 DEFAULT_SLE_BATCH_SIZE = 16
-DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "data" / "val_ground_truth.jsonl"
+EVALUATION_DIR = Path(__file__).resolve().parent
+DEFAULT_GROUND_TRUTH_ROOT = EVALUATION_DIR / "ground_truth"
+DEFAULT_GROUND_TRUTH_SPLIT = "val"
+DEFAULT_GROUND_TRUTH_PATH = DEFAULT_GROUND_TRUTH_ROOT / DEFAULT_GROUND_TRUTH_SPLIT / "reference.jsonl"
+REFERENCE_FILE_CANDIDATES = (
+    "reference.jsonl",
+    "final_reference.jsonl",
+    "val_ground_truth.jsonl",
+    "test_reference.jsonl",
+)
+GT_ENTITY_FACT_FILE_CANDIDATES = (
+    "complex_ground_truth_entity_facts.jsonl",
+    "test_complex_ground_truth_entity_facts.jsonl",
+    "val_complex_ground_truth_entity_facts.jsonl",
+)
 DEFAULT_LABEL_KEYS = ("label", "pred_label", "predicted_label")
+DEFAULT_ID_KEYS = ("sample_id", "id")
+CHALLENGE_DETECTION_FILE = "detection.jsonl"
+CHALLENGE_COMPLEX_FILE = "complex.jsonl"
+CHALLENGE_SIMPLE_FILE = "simple.jsonl"
+CHALLENGE_SUBMISSION_FILES = (
+    CHALLENGE_DETECTION_FILE,
+    CHALLENGE_COMPLEX_FILE,
+    CHALLENGE_SIMPLE_FILE,
+)
+CHALLENGE_ID_KEYS = ("id", "sample_id")
 
 
 def _write_progress_message(iterator, message):
@@ -102,10 +130,25 @@ def _compute_simple_overall_score(simple_bert_f1, simple_sle_score):
     return round_float(0.7 * float(simple_bert_f1) + 0.3 * float(simple_sle_norm))
 
 
-def _compute_explanation_score(complex_bert_f1, simple_overall_score):
+def _compute_mean_if_all_present(*values):
+    if any(value is None for value in values):
+        return None
+    return round_float(sum(float(value) for value in values) / len(values))
+
+
+def _compute_reference_explanation_score(complex_bert_f1, simple_overall_score):
     if complex_bert_f1 is None or simple_overall_score is None:
         return None
     return round_float((float(complex_bert_f1) + float(simple_overall_score)) / 2.0)
+
+
+def _compute_paper_explanation_score(reference_explanation_score, grounding_score):
+    if reference_explanation_score is None or grounding_score is None:
+        return None
+    return round_float(
+        0.4 * float(reference_explanation_score)
+        + 0.6 * float(grounding_score)
+    )
 
 
 def _compute_overall_score(detection_f1, explanation_score):
@@ -125,7 +168,24 @@ def _normalize_label(value):
     return None
 
 
-def _compute_detection_f1(rows):
+def _zero_filled_mean(values, denominator):
+    if denominator <= 0:
+        return None
+    total = 0.0
+    for value in values:
+        if value is None:
+            continue
+        total += float(value)
+    return round_float(total / denominator)
+
+
+def _bool_mean(values, denominator):
+    if denominator <= 0:
+        return None
+    return round_float(sum(1.0 for value in values if value is True) / denominator)
+
+
+def _binary_f1(rows, *, positive_label):
     true_positive = 0
     false_positive = 0
     false_negative = 0
@@ -136,11 +196,11 @@ def _compute_detection_f1(rows):
         if ground_truth_label is None:
             continue
         seen_label = True
-        if predicted_label == "fake" and ground_truth_label == "fake":
+        if predicted_label == positive_label and ground_truth_label == positive_label:
             true_positive += 1
-        elif predicted_label == "fake" and ground_truth_label == "real":
+        elif predicted_label == positive_label and ground_truth_label != positive_label:
             false_positive += 1
-        elif ground_truth_label == "fake":
+        elif ground_truth_label == positive_label:
             false_negative += 1
     if not seen_label:
         return None
@@ -150,32 +210,537 @@ def _compute_detection_f1(rows):
     return round_float((2 * true_positive) / denominator)
 
 
-def _build_final_scores(rows):
-    complex_bert_f1 = _compute_mean(item.get("complex_bert_f1") for item in rows)
-    simple_sle_score = _compute_mean(item.get("simple_sle_score") for item in rows)
-    simple_sle_normalized = _compute_mean(item.get("simple_sle_normalized") for item in rows)
-    if simple_sle_normalized is None:
-        simple_sle_normalized = _normalize_simple_sle(simple_sle_score)
-    simple_overall_score = _compute_mean(item.get("simple_overall_score") for item in rows)
-    explanation_score = _compute_explanation_score(complex_bert_f1, simple_overall_score)
-    detection_f1 = _compute_detection_f1(rows)
-    overall_score = _compute_overall_score(detection_f1, explanation_score)
+def _compute_detection_metrics(rows):
+    labeled_rows = [row for row in rows if row.get("ground_truth_label") is not None]
+    if not labeled_rows:
+        return {
+            "detection_macro_f1": None,
+            "detection_fake_f1": None,
+            "detection_real_f1": None,
+            "detection_accuracy": None,
+        }
+    fake_f1 = _binary_f1(labeled_rows, positive_label="fake")
+    real_f1 = _binary_f1(labeled_rows, positive_label="real")
+    if fake_f1 is None or real_f1 is None:
+        macro_f1 = None
+    else:
+        macro_f1 = round_float((float(fake_f1) + float(real_f1)) / 2.0)
     return {
+        "detection_macro_f1": macro_f1,
+        "detection_fake_f1": fake_f1,
+        "detection_real_f1": real_f1,
+        "detection_accuracy": _bool_mean(
+            (item.get("label_correct") for item in labeled_rows),
+            len(labeled_rows),
+        ),
+    }
+
+
+def _build_final_scores(rows):
+    denominator = len(rows)
+    complex_bert_f1 = _zero_filled_mean((item.get("complex_bert_f1") for item in rows), denominator)
+    simple_sle_score = _compute_mean(item.get("simple_sle_score") for item in rows)
+    simple_sle_normalized = _zero_filled_mean((item.get("simple_sle_normalized") for item in rows), denominator)
+    simple_bert_f1 = _zero_filled_mean((item.get("simple_bert_f1") for item in rows), denominator)
+    if simple_bert_f1 is None or simple_sle_normalized is None:
+        simple_overall_score = None
+    else:
+        simple_overall_score = round_float(0.7 * float(simple_bert_f1) + 0.3 * float(simple_sle_normalized))
+    reference_explanation_score = _compute_reference_explanation_score(
+        complex_bert_f1,
+        simple_overall_score,
+    )
+    complex_entity_f1 = _zero_filled_mean((item.get("complex_entity_f1") for item in rows), denominator)
+    complex_evidence_f1 = _zero_filled_mean((item.get("complex_evidence_f1") for item in rows), denominator)
+    grounding_score = _compute_mean_if_all_present(complex_entity_f1, complex_evidence_f1)
+    explanation_score = _compute_paper_explanation_score(
+        reference_explanation_score,
+        grounding_score,
+    )
+    detection_metrics = _compute_detection_metrics(rows)
+    detection_f1 = detection_metrics["detection_macro_f1"]
+    overall_score = _compute_overall_score(detection_f1, explanation_score)
+    submitted_rows = [
+        row
+        for row in rows
+        if (
+            row.get("predicted_label") is not None
+            or row.get("complex_bert_f1") is not None
+            or row.get("simple_bert_f1") is not None
+        )
+    ]
+    return {
+        "metric_version": "acm_mm_2026_paper",
+        "samples_expected": denominator,
         "samples_completed": len(rows),
+        "submission_rows_with_any_scored_field": len(submitted_rows),
+        "detection_macro_f1": detection_metrics["detection_macro_f1"],
         "detection_f1": detection_f1,
-        "detection_accuracy": _compute_mean(item.get("label_correct") for item in rows),
-        "accuracy": _compute_mean(item.get("label_correct") for item in rows),
+        "detection_fake_f1": detection_metrics["detection_fake_f1"],
+        "detection_real_f1": detection_metrics["detection_real_f1"],
+        "detection_accuracy": detection_metrics["detection_accuracy"],
+        "accuracy": detection_metrics["detection_accuracy"],
         "complex_bert_f1": complex_bert_f1,
-        "complex_entity_f1": _compute_mean(item.get("complex_entity_f1") for item in rows),
-        "complex_evidence_f1": _compute_mean(item.get("complex_evidence_f1") for item in rows),
-        "complex_overall_score": _compute_mean(item.get("complex_overall_score") for item in rows),
-        "simple_bert_f1": _compute_mean(item.get("simple_bert_f1") for item in rows),
+        "complex_explanation_score": complex_bert_f1,
+        "complex_entity_f1": complex_entity_f1,
+        "entity_score": complex_entity_f1,
+        "complex_evidence_f1": complex_evidence_f1,
+        "evidence_score": complex_evidence_f1,
+        "complex_overall_score": _zero_filled_mean((item.get("complex_overall_score") for item in rows), denominator),
+        "simple_bert_f1": simple_bert_f1,
         "simple_sle_score": simple_sle_score,
         "simple_sle_normalized": simple_sle_normalized,
         "simple_overall_score": simple_overall_score,
+        "simple_explanation_score": simple_overall_score,
+        "reference_explanation_score": reference_explanation_score,
+        "grounding_score": grounding_score,
         "explanation_score": explanation_score,
+        "final_score": overall_score,
         "overall_score": overall_score,
+        "score_formula": {
+            "detection_macro_f1": "(F1_fake + F1_real) / 2",
+            "simple_explanation_score": "0.7 * simple_bert_f1 + 0.3 * simple_sle_normalized",
+            "reference_explanation_score": "(complex_explanation_score + simple_explanation_score) / 2",
+            "grounding_score": "(entity_score + evidence_score) / 2",
+            "explanation_score": "0.4 * reference_explanation_score + 0.6 * grounding_score",
+            "final_score": "(detection_macro_f1 + explanation_score) / 2",
+        },
     }
+
+
+def _submission_id_aliases(sample_id: str) -> Tuple[str, ...]:
+    normalized = sample_id.strip().replace("\\", "/")
+    path = PurePosixPath(normalized)
+    aliases = [sample_id.strip(), normalized, path.name]
+    if path.suffix:
+        aliases.append(str(path.with_suffix("")))
+        aliases.append(path.stem)
+    else:
+        aliases.append(path.stem)
+
+    unique: List[str] = []
+    for alias in aliases:
+        if alias and alias not in unique:
+            unique.append(alias)
+    return tuple(unique)
+
+
+def _build_reference_alias_map(
+    reference_rows: Sequence[Mapping[str, Any]],
+    reference_id_keys: Sequence[str],
+) -> Tuple[Dict[str, str], Dict[str, Optional[str]], List[str]]:
+    reference_ids: Dict[str, str] = {}
+    aliases: Dict[str, Optional[str]] = {}
+    ordered_ids: List[str] = []
+    for row_index, row in enumerate(reference_rows, start=1):
+        sample_id_value, _ = get_first_present(dict(row), reference_id_keys)
+        if sample_id_value is None:
+            raise ValueError(
+                "Reference row {0} is missing an id. Tried keys: {1}".format(
+                    row_index,
+                    ", ".join(reference_id_keys),
+                )
+            )
+        canonical_id = str(sample_id_value).strip()
+        if not canonical_id:
+            raise ValueError("Reference row {0} has an empty id.".format(row_index))
+        if canonical_id in reference_ids:
+            raise ValueError("Duplicate reference id: {0}".format(canonical_id))
+
+        reference_ids[canonical_id] = canonical_id
+        ordered_ids.append(canonical_id)
+        for alias in _submission_id_aliases(canonical_id):
+            previous = aliases.get(alias)
+            if previous is None and alias in aliases:
+                continue
+            if previous is not None and previous != canonical_id:
+                aliases[alias] = None
+            else:
+                aliases[alias] = canonical_id
+    return reference_ids, aliases, ordered_ids
+
+
+def _resolve_submission_id(
+    sample_id: str,
+    *,
+    reference_ids: Mapping[str, str],
+    reference_aliases: Mapping[str, Optional[str]],
+) -> Optional[str]:
+    stripped_id = sample_id.strip()
+    if stripped_id in reference_ids:
+        return stripped_id
+    matches = {
+        canonical_id
+        for alias in _submission_id_aliases(stripped_id)
+        for canonical_id in [reference_aliases.get(alias)]
+        if canonical_id is not None
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
+
+
+def _parse_jsonl_text(text: str, *, source: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "Malformed JSON in {0}:{1}: {2}".format(source, line_number, exc.msg)
+            ) from exc
+        if not isinstance(payload, dict):
+            raise ValueError(
+                "Expected JSON object in {0}:{1}, found {2}.".format(
+                    source,
+                    line_number,
+                    type(payload).__name__,
+                )
+            )
+        rows.append(payload)
+    return rows
+
+
+def _read_challenge_submission_files(submission_path: Path) -> Dict[str, str]:
+    if submission_path.is_file():
+        if submission_path.suffix.lower() != ".zip":
+            raise ValueError("Challenge submission file must be a .zip: {0}".format(submission_path))
+        try:
+            with zipfile.ZipFile(submission_path) as archive:
+                members = [name for name in archive.namelist() if not name.endswith("/")]
+                contents: Dict[str, str] = {}
+                for expected in CHALLENGE_SUBMISSION_FILES:
+                    matches = [name for name in members if PurePosixPath(name).name == expected]
+                    if len(matches) > 1:
+                        raise ValueError("Submission zip contains multiple {0} files.".format(expected))
+                    if matches:
+                        contents[expected] = archive.read(matches[0]).decode("utf-8")
+        except zipfile.BadZipFile as exc:
+            raise ValueError("Malformed submission zip: {0}".format(submission_path)) from exc
+        except UnicodeDecodeError as exc:
+            raise ValueError("Submission files must be UTF-8 encoded: {0}".format(submission_path)) from exc
+    elif submission_path.is_dir():
+        contents = {}
+        for expected in CHALLENGE_SUBMISSION_FILES:
+            matches = sorted(path for path in submission_path.rglob(expected) if path.is_file())
+            if len(matches) > 1:
+                raise ValueError("Submission directory contains multiple {0} files.".format(expected))
+            if matches:
+                contents[expected] = matches[0].read_text(encoding="utf-8")
+    else:
+        raise ValueError("Submission path does not exist: {0}".format(submission_path))
+
+    missing = [filename for filename in CHALLENGE_SUBMISSION_FILES if filename not in contents]
+    if missing:
+        raise ValueError(
+            "Challenge submission is missing required file(s): {0}".format(
+                ", ".join(missing)
+            )
+        )
+    return contents
+
+
+def _canonical_submission_id(
+    row: Mapping[str, Any],
+    *,
+    row_number: int,
+    source: str,
+    reference_ids: Mapping[str, str],
+    reference_aliases: Mapping[str, Optional[str]],
+) -> str:
+    sample_id_value, _ = get_first_present(dict(row), CHALLENGE_ID_KEYS)
+    if sample_id_value is None:
+        raise ValueError("{0}:{1} missing id.".format(source, row_number))
+    raw_id = str(sample_id_value).strip()
+    if not raw_id:
+        raise ValueError("{0}:{1} has an empty id.".format(source, row_number))
+    canonical_id = _resolve_submission_id(
+        raw_id,
+        reference_ids=reference_ids,
+        reference_aliases=reference_aliases,
+    )
+    if canonical_id is None:
+        raise ValueError("{0}:{1} contains unknown or ambiguous id: {2}".format(source, row_number, raw_id))
+    return canonical_id
+
+
+def _add_challenge_field(
+    combined_rows: Dict[str, Dict[str, Any]],
+    canonical_id: str,
+    field_name: str,
+    field_value: Any,
+) -> None:
+    row = combined_rows.setdefault(
+        canonical_id,
+        {
+            "sample_id": canonical_id,
+            "id": canonical_id,
+        },
+    )
+    row[field_name] = field_value
+
+
+def _merge_detection_rows(
+    combined_rows: Dict[str, Dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    reference_ids: Mapping[str, str],
+    reference_aliases: Mapping[str, Optional[str]],
+    label_keys: Sequence[str],
+) -> None:
+    seen_ids = set()
+    for row_number, row in enumerate(rows, start=1):
+        canonical_id = _canonical_submission_id(
+            row,
+            row_number=row_number,
+            source=CHALLENGE_DETECTION_FILE,
+            reference_ids=reference_ids,
+            reference_aliases=reference_aliases,
+        )
+        if canonical_id in seen_ids:
+            raise ValueError("{0} contains duplicate id: {1}".format(CHALLENGE_DETECTION_FILE, canonical_id))
+        seen_ids.add(canonical_id)
+        label_value, label_key = get_first_present(dict(row), label_keys)
+        if label_key is None:
+            raise ValueError(
+                "{0}:{1} id '{2}' missing predicted label. Tried keys: {3}".format(
+                    CHALLENGE_DETECTION_FILE,
+                    row_number,
+                    canonical_id,
+                    ", ".join(label_keys),
+                )
+            )
+        if _normalize_label(label_value) is None:
+            raise ValueError(
+                "{0}:{1} id '{2}' has invalid predicted label: {3!r}".format(
+                    CHALLENGE_DETECTION_FILE,
+                    row_number,
+                    canonical_id,
+                    label_value,
+                )
+            )
+        _add_challenge_field(combined_rows, canonical_id, "pred_label", label_value)
+
+
+def _merge_explanation_rows(
+    combined_rows: Dict[str, Dict[str, Any]],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    reference_ids: Mapping[str, str],
+    reference_aliases: Mapping[str, Optional[str]],
+    source: str,
+    field_name: str,
+    candidate_keys: Sequence[str],
+) -> None:
+    seen_ids = set()
+    for row_number, row in enumerate(rows, start=1):
+        canonical_id = _canonical_submission_id(
+            row,
+            row_number=row_number,
+            source=source,
+            reference_ids=reference_ids,
+            reference_aliases=reference_aliases,
+        )
+        if canonical_id in seen_ids:
+            raise ValueError("{0} contains duplicate id: {1}".format(source, canonical_id))
+        seen_ids.add(canonical_id)
+        explanation_value, explanation_key = get_first_present(dict(row), candidate_keys)
+        if explanation_key is None:
+            raise ValueError(
+                "{0}:{1} id '{2}' missing {3}. Tried keys: {4}".format(
+                    source,
+                    row_number,
+                    canonical_id,
+                    field_name,
+                    ", ".join(candidate_keys),
+                )
+            )
+        if not isinstance(explanation_value, str):
+            raise ValueError(
+                "{0}:{1} id '{2}' has non-string {3}.".format(
+                    source,
+                    row_number,
+                    canonical_id,
+                    field_name,
+                )
+            )
+        _add_challenge_field(combined_rows, canonical_id, field_name, explanation_value)
+
+
+def _load_challenge_submission_rows(
+    submission_path: Path,
+    reference_rows: Sequence[Mapping[str, Any]],
+    args: argparse.Namespace,
+) -> List[Dict[str, Any]]:
+    reference_ids, reference_aliases, ordered_reference_ids = _build_reference_alias_map(
+        reference_rows,
+        args.reference_id_keys,
+    )
+    files = _read_challenge_submission_files(submission_path)
+    combined_rows: Dict[str, Dict[str, Any]] = {}
+    _merge_detection_rows(
+        combined_rows,
+        _parse_jsonl_text(files[CHALLENGE_DETECTION_FILE], source=CHALLENGE_DETECTION_FILE),
+        reference_ids=reference_ids,
+        reference_aliases=reference_aliases,
+        label_keys=args.submission_label_keys,
+    )
+    _merge_explanation_rows(
+        combined_rows,
+        _parse_jsonl_text(files[CHALLENGE_COMPLEX_FILE], source=CHALLENGE_COMPLEX_FILE),
+        reference_ids=reference_ids,
+        reference_aliases=reference_aliases,
+        source=CHALLENGE_COMPLEX_FILE,
+        field_name="complex_explanation",
+        candidate_keys=args.submission_complex_keys,
+    )
+    _merge_explanation_rows(
+        combined_rows,
+        _parse_jsonl_text(files[CHALLENGE_SIMPLE_FILE], source=CHALLENGE_SIMPLE_FILE),
+        reference_ids=reference_ids,
+        reference_aliases=reference_aliases,
+        source=CHALLENGE_SIMPLE_FILE,
+        field_name="simple_explanation",
+        candidate_keys=args.submission_simple_keys,
+    )
+    return [combined_rows[sample_id] for sample_id in ordered_reference_ids if sample_id in combined_rows]
+
+
+def _load_submission_rows(args: argparse.Namespace, reference_rows: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], str]:
+    submission_path = Path(args.submission)
+    if submission_path.is_file() and submission_path.suffix.lower() == ".zip":
+        submission_format = "challenge_zip"
+    elif submission_path.is_dir():
+        submission_format = "challenge_folder"
+    else:
+        raise ValueError(
+            "Submission must be either a .zip file or an extracted folder containing "
+            "detection.jsonl, complex.jsonl, and simple.jsonl: {0}".format(submission_path)
+        )
+    return _load_challenge_submission_rows(submission_path, reference_rows, args), submission_format
+
+
+def _first_existing_file(folder: Path, candidates: Sequence[str]) -> Optional[Path]:
+    for candidate in candidates:
+        path = folder / candidate
+        if path.exists():
+            return path
+    return None
+
+
+def _resolve_ground_truth_paths(args: argparse.Namespace) -> None:
+    if args.ground_truth_split and args.ground_truth_dir:
+        raise ValueError("Use either --ground-truth-split or --ground-truth-dir, not both.")
+
+    ground_truth_dir = None
+    if args.ground_truth_split:
+        ground_truth_dir = DEFAULT_GROUND_TRUTH_ROOT / args.ground_truth_split
+    elif args.ground_truth_dir:
+        ground_truth_dir = Path(args.ground_truth_dir)
+    else:
+        default_dir = DEFAULT_GROUND_TRUTH_ROOT / DEFAULT_GROUND_TRUTH_SPLIT
+        if default_dir.exists():
+            ground_truth_dir = default_dir
+
+    if ground_truth_dir is not None:
+        ground_truth_dir = ground_truth_dir.expanduser().resolve()
+        if not ground_truth_dir.exists():
+            raise FileNotFoundError("Ground-truth folder not found: {0}".format(ground_truth_dir))
+        args.ground_truth_dir = ground_truth_dir
+
+        if args.ground_truth is None:
+            reference_path = _first_existing_file(ground_truth_dir, REFERENCE_FILE_CANDIDATES)
+            if reference_path is None:
+                raise FileNotFoundError(
+                    "Could not find a reference JSONL in {0}. Tried: {1}".format(
+                        ground_truth_dir,
+                        ", ".join(REFERENCE_FILE_CANDIDATES),
+                    )
+                )
+            args.ground_truth = reference_path
+
+        if args.gt_entity_facts is None:
+            gt_entity_facts = _first_existing_file(ground_truth_dir, GT_ENTITY_FACT_FILE_CANDIDATES)
+            if gt_entity_facts is not None:
+                args.gt_entity_facts = gt_entity_facts
+            else:
+                args.gt_entity_facts = ground_truth_dir / GT_ENTITY_FACT_FILE_CANDIDATES[0]
+
+    if args.ground_truth is None:
+        args.ground_truth = DEFAULT_GROUND_TRUTH_PATH
+
+    args.ground_truth = Path(args.ground_truth).expanduser().resolve()
+    if args.gt_entity_facts is not None:
+        args.gt_entity_facts = Path(args.gt_entity_facts).expanduser().resolve()
+
+
+def _load_gt_entity_fact_cache(path: Optional[Path]) -> Dict[str, Dict[str, Any]]:
+    if path is None or not Path(path).exists():
+        return {}
+
+    cache_rows: Dict[str, Dict[str, Any]] = {}
+    for row in read_jsonl(path):
+        sample_id = row.get("sample_id", row.get("id"))
+        if sample_id is None:
+            continue
+        if row.get("status") not in (None, "ok"):
+            continue
+        try:
+            diagnostic_entities = get_reference_entities(row)
+            evidence_claims = get_reference_claims(row)
+        except Exception:
+            continue
+        if not isinstance(diagnostic_entities, list) or not isinstance(evidence_claims, list):
+            continue
+        cache_rows[str(sample_id)] = row
+    return cache_rows
+
+
+def _reference_payload_from_gt_cache(
+    sample_id: str,
+    reference_text: str,
+    cache_row: Mapping[str, Any],
+    *,
+    verify_text_hash: bool,
+) -> Optional[Dict[str, Any]]:
+    text_sha256 = cache_row.get("text_sha256") or cache_row.get("reference_text_sha256")
+    if verify_text_hash and text_sha256 and text_sha256 != compute_hash(reference_text):
+        return None
+    return {
+        "sample_id": sample_id,
+        "reference_text_sha256": compute_hash(reference_text),
+        "text_sha256": compute_hash(reference_text),
+        "explanation": reference_text,
+        "diagnostic_entities": get_reference_entities(dict(cache_row)),
+        "evidence_claims": get_reference_claims(dict(cache_row)),
+        "judge_model": cache_row.get("judge_model"),
+        "source": "gt_entity_facts_cache",
+    }
+
+
+def _gt_entity_fact_cache_rows(rows: Sequence[Mapping[str, Any]], *, judge_model: str) -> List[Dict[str, Any]]:
+    cache_rows: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("_gt_extraction")
+        reference_text = row.get("_reference_complex_text")
+        if not payload or not reference_text:
+            continue
+        cache_rows.append(
+            {
+                "sample_id": row["sample_id"],
+                "status": "ok",
+                "label": row.get("ground_truth_label"),
+                "reference_complex_key": row.get("_reference_complex_key"),
+                "text_sha256": compute_hash(reference_text),
+                "judge_model": payload.get("judge_model") or judge_model,
+                "diagnostic_entities": get_reference_entities(payload),
+                "evidence_claims": get_reference_claims(payload),
+            }
+        )
+    return cache_rows
 
 
 def _parse_reference_payload(sample_id: str, explanation_text: str, raw_response: str) -> Dict[str, Any]:
@@ -312,7 +877,8 @@ def _compute_sle_scores(
     return scores
 
 
-def _prepare_rows(aligned_rows, args, show_progress):
+def _prepare_rows(aligned_rows, args, show_progress, gt_entity_fact_cache=None):
+    gt_entity_fact_cache = gt_entity_fact_cache or {}
     rows: List[Dict[str, Any]] = []
     sample_iterator = build_progress_bar(
         aligned_rows,
@@ -321,8 +887,10 @@ def _prepare_rows(aligned_rows, args, show_progress):
         disable=not show_progress,
     )
     for sample_id, submission_row, reference_row in sample_iterator:
+        submission_present = bool(submission_row)
         row: Dict[str, Any] = {
             "sample_id": sample_id,
+            "submission_present": submission_present,
             "predicted_label": None,
             "ground_truth_label": None,
             "label_correct": None,
@@ -335,9 +903,11 @@ def _prepare_rows(aligned_rows, args, show_progress):
             "simple_overall_score": None,
             "_submission_complex_text": None,
             "_reference_complex_text": None,
+            "_reference_complex_key": None,
             "_submission_simple_text": None,
             "_reference_simple_text": None,
             "_gt_extraction": None,
+            "_gt_extraction_source": None,
             "_pred_extraction": None,
             "_gt_to_pred_entity": None,
             "_gt_to_pred_evidence": None,
@@ -361,60 +931,73 @@ def _prepare_rows(aligned_rows, args, show_progress):
                 "Warning: reference label preparation failed for {0}: {1}".format(sample_id, exc),
             )
 
-        try:
-            submission_label, _ = extract_required_text(
-                submission_row,
-                args.submission_label_keys,
-                field_role="submission label",
-                sample_id=sample_id,
-            )
-            normalized_submission_label = _normalize_label(submission_label)
-            row["predicted_label"] = normalized_submission_label
-        except Exception as exc:
-            _write_progress_message(
-                sample_iterator,
-                "Warning: submission label preparation failed for {0}: {1}".format(sample_id, exc),
-            )
+        if submission_present:
+            try:
+                submission_label, _ = extract_required_text(
+                    submission_row,
+                    args.submission_label_keys,
+                    field_role="submission label",
+                    sample_id=sample_id,
+                )
+                normalized_submission_label = _normalize_label(submission_label)
+                row["predicted_label"] = normalized_submission_label
+            except Exception as exc:
+                _write_progress_message(
+                    sample_iterator,
+                    "Warning: submission label preparation failed for {0}: {1}".format(sample_id, exc),
+                )
         if normalized_reference_label is not None:
             row["label_correct"] = row.get("predicted_label") == normalized_reference_label
 
-        try:
-            row["_submission_complex_text"], _ = extract_required_text(
-                submission_row,
-                args.submission_complex_keys,
-                field_role="submission complex explanation",
-                sample_id=sample_id,
-            )
-            row["_reference_complex_text"], _ = extract_required_text(
-                reference_row,
-                args.reference_complex_keys,
-                field_role="reference complex explanation",
-                sample_id=sample_id,
-            )
-        except Exception as exc:
-            _write_progress_message(
-                sample_iterator,
-                "Warning: complex text preparation failed for {0}: {1}".format(sample_id, exc),
-            )
+        if submission_present:
+            try:
+                row["_submission_complex_text"], _ = extract_required_text(
+                    submission_row,
+                    args.submission_complex_keys,
+                    field_role="submission complex explanation",
+                    sample_id=sample_id,
+                )
+                row["_reference_complex_text"], row["_reference_complex_key"] = extract_required_text(
+                    reference_row,
+                    args.reference_complex_keys,
+                    field_role="reference complex explanation",
+                    sample_id=sample_id,
+                )
+                cache_payload = gt_entity_fact_cache.get(sample_id)
+                if cache_payload is not None:
+                    row["_gt_extraction"] = _reference_payload_from_gt_cache(
+                        sample_id,
+                        row["_reference_complex_text"],
+                        cache_payload,
+                        verify_text_hash=not args.no_verify_gt_entity_facts,
+                    )
+                    if row["_gt_extraction"] is not None:
+                        row["_gt_extraction_source"] = "cache"
+            except Exception as exc:
+                _write_progress_message(
+                    sample_iterator,
+                    "Warning: complex text preparation failed for {0}: {1}".format(sample_id, exc),
+                )
 
-        try:
-            row["_submission_simple_text"], _ = extract_required_text(
-                submission_row,
-                args.submission_simple_keys,
-                field_role="submission simple explanation",
-                sample_id=sample_id,
-            )
-            row["_reference_simple_text"], _ = extract_required_text(
-                reference_row,
-                args.reference_simple_keys,
-                field_role="reference simple explanation",
-                sample_id=sample_id,
-            )
-        except Exception as exc:
-            _write_progress_message(
-                sample_iterator,
-                "Warning: simple text preparation failed for {0}: {1}".format(sample_id, exc),
-            )
+        if submission_present:
+            try:
+                row["_submission_simple_text"], _ = extract_required_text(
+                    submission_row,
+                    args.submission_simple_keys,
+                    field_role="submission simple explanation",
+                    sample_id=sample_id,
+                )
+                row["_reference_simple_text"], _ = extract_required_text(
+                    reference_row,
+                    args.reference_simple_keys,
+                    field_role="reference simple explanation",
+                    sample_id=sample_id,
+                )
+            except Exception as exc:
+                _write_progress_message(
+                    sample_iterator,
+                    "Warning: simple text preparation failed for {0}: {1}".format(sample_id, exc),
+                )
 
         rows.append(row)
     return rows
@@ -430,7 +1013,11 @@ def _run_extraction_stage(
     desc,
     show_progress,
 ):
-    active_indices = [index for index, row in enumerate(rows) if row.get(text_key)]
+    active_indices = [
+        index
+        for index, row in enumerate(rows)
+        if row.get(text_key) and row.get(output_key) is None
+    ]
     if not active_indices:
         return
 
@@ -483,6 +1070,8 @@ def _run_extraction_stage(
                     rows[index][text_key],
                     raw_response,
                 )
+                if output_key == "_gt_extraction":
+                    rows[index]["_gt_extraction_source"] = "computed"
             except Exception as exc:
                 _write_progress_message(
                     batch_iterator,
@@ -653,17 +1242,27 @@ def _finalize_rows(rows):
             row.get("simple_sle_score"),
         )
         row["simple_sle_normalized"] = _normalize_simple_sle(row.get("simple_sle_score"))
-        row["explanation_score"] = _compute_explanation_score(
+        row["reference_explanation_score"] = _compute_reference_explanation_score(
             row.get("complex_bert_f1"),
             row.get("simple_overall_score"),
+        )
+        row["grounding_score"] = _compute_mean_if_all_present(
+            row.get("complex_entity_f1"),
+            row.get("complex_evidence_f1"),
+        )
+        row["explanation_score"] = _compute_paper_explanation_score(
+            row.get("reference_explanation_score"),
+            row.get("grounding_score"),
         )
         finalized_rows.append(
             {
                 "sample_id": row["sample_id"],
+                "submission_present": row.get("submission_present"),
                 "predicted_label": row.get("predicted_label"),
                 "ground_truth_label": row.get("ground_truth_label"),
                 "label_correct": row.get("label_correct"),
                 "complex_bert_f1": row.get("complex_bert_f1"),
+                "complex_explanation_score": row.get("complex_bert_f1"),
                 "complex_entity_f1": row.get("complex_entity_f1"),
                 "complex_evidence_f1": row.get("complex_evidence_f1"),
                 "complex_overall_score": row.get("complex_overall_score"),
@@ -671,6 +1270,9 @@ def _finalize_rows(rows):
                 "simple_sle_score": row.get("simple_sle_score"),
                 "simple_sle_normalized": row.get("simple_sle_normalized"),
                 "simple_overall_score": row.get("simple_overall_score"),
+                "simple_explanation_score": row.get("simple_overall_score"),
+                "reference_explanation_score": row.get("reference_explanation_score"),
+                "grounding_score": row.get("grounding_score"),
                 "explanation_score": row.get("explanation_score"),
             }
         )
@@ -682,17 +1284,35 @@ def main() -> None:
         description="Run end-to-end evaluation in stage-wise batches on one GPU."
     )
     parser.add_argument("--submission", required=True)
-    parser.add_argument("--ground-truth", default=DEFAULT_GROUND_TRUTH_PATH)
+    parser.add_argument("--ground-truth", type=Path, default=None)
+    parser.add_argument(
+        "--ground-truth-split",
+        choices=["val", "test"],
+        default=None,
+        help="Use evaluation/ground_truth/<split>. Defaults to val when that folder exists.",
+    )
+    parser.add_argument(
+        "--ground-truth-dir",
+        type=Path,
+        default=None,
+        help="Folder containing reference.jsonl and complex_ground_truth_entity_facts.jsonl.",
+    )
+    parser.add_argument(
+        "--gt-entity-facts",
+        type=Path,
+        default=None,
+        help="Optional precomputed ground-truth entity/fact JSONL cache.",
+    )
     parser.add_argument("--output-dir", required=True)
 
-    parser.add_argument("--submission-id-keys", nargs="+", default=["sample_id"])
-    parser.add_argument("--reference-id-keys", nargs="+", default=["sample_id"])
+    parser.add_argument("--submission-id-keys", nargs="+", default=list(DEFAULT_ID_KEYS))
+    parser.add_argument("--reference-id-keys", nargs="+", default=list(DEFAULT_ID_KEYS))
     parser.add_argument("--submission-label-keys", nargs="+", default=list(DEFAULT_LABEL_KEYS))
     parser.add_argument("--reference-label-keys", nargs="+", default=["label"])
     parser.add_argument("--submission-complex-keys", nargs="+", default=["complex_explanation"])
-    parser.add_argument("--reference-complex-keys", nargs="+", default=["complex_explanation"])
+    parser.add_argument("--reference-complex-keys", nargs="+", default=["complex_explanation", "complex_reference"])
     parser.add_argument("--submission-simple-keys", nargs="+", default=["simple_explanation"])
-    parser.add_argument("--reference-simple-keys", nargs="+", default=["simple_explanation"])
+    parser.add_argument("--reference-simple-keys", nargs="+", default=["simple_explanation", "simple_reference"])
 
     parser.add_argument("--entity-evidence-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "entity_evidence_extraction_prompt.txt")
     parser.add_argument("--semantic-coverage-prompt", type=Path, default=Path(__file__).resolve().parent / "prompts" / "semantic_coverage_prompt.txt")
@@ -702,7 +1322,7 @@ def main() -> None:
     parser.add_argument("--bertscore-rescale-with-baseline", action="store_true", default=False)
     parser.add_argument("--bertscore-batch-size", type=int, default=DEFAULT_BERT_BATCH_SIZE)
 
-    parser.add_argument("--backend", choices=["transformers", "openai_compatible"], default="transformers")
+    parser.add_argument("--backend", choices=["transformers", "openai_compatible", "vllm"], default="transformers")
     parser.add_argument("--model-name", default="Qwen/Qwen3.5-4B")
     parser.add_argument("--base-url", default="http://localhost:8000/v1")
     parser.add_argument("--api-key", default=None)
@@ -718,6 +1338,8 @@ def main() -> None:
     parser.add_argument("--hf-cache-dir", default=None)
     parser.add_argument("--enable-thinking", action="store_true", default=False)
     parser.add_argument("--skip-qwen", action="store_true", default=False)
+    parser.add_argument("--no-verify-gt-entity-facts", action="store_true", default=False)
+    parser.add_argument("--no-update-gt-entity-facts", action="store_true", default=False)
     parser.add_argument("--no-preload-models", action="store_true", default=False)
     parser.add_argument("--no-progress", action="store_true", default=False)
 
@@ -729,25 +1351,39 @@ def main() -> None:
     args = parser.parse_args()
     args.preload_models = not args.no_preload_models
     args.show_progress = not args.no_progress
+    _resolve_ground_truth_paths(args)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     per_sample_output_path = output_dir / "per_sample_scores.jsonl"
     final_scores_output_path = output_dir / "final_scores.json"
 
-    submission_rows = read_jsonl(args.submission)
     reference_rows = read_jsonl(args.ground_truth)
+    gt_entity_fact_cache = _load_gt_entity_fact_cache(args.gt_entity_facts)
+    submission_rows, resolved_submission_format = _load_submission_rows(args, reference_rows)
     aligned_rows, diagnostics = align_submission_and_reference(
         submission_rows,
         reference_rows,
         submission_id_keys=args.submission_id_keys,
         reference_id_keys=args.reference_id_keys,
+        include_missing_submission=True,
     )
 
     if diagnostics:
         print("Alignment diagnostics: {0}".format(len(diagnostics)))
+    print("Submission format: {0}".format(resolved_submission_format))
+    print("Ground truth: {0}".format(args.ground_truth))
+    if args.gt_entity_facts:
+        print(
+            "GT entity/fact cache: {0} ({1} rows loaded)".format(
+                args.gt_entity_facts,
+                len(gt_entity_fact_cache),
+            )
+        )
+    else:
+        print("GT entity/fact cache: none; GT entities/facts will be computed if Qwen stages run.")
 
-    rows = _prepare_rows(aligned_rows, args, args.show_progress)
+    rows = _prepare_rows(aligned_rows, args, args.show_progress, gt_entity_fact_cache)
     if args.skip_qwen:
         print("Skipping Qwen extraction and coverage. Qwen-based complex metrics will be written as null.")
     else:
@@ -775,6 +1411,22 @@ def main() -> None:
             desc="Qwen extract ground truth",
             show_progress=args.show_progress,
         )
+        computed_gt_count = sum(1 for row in rows if row.get("_gt_extraction_source") == "computed")
+        cached_gt_count = sum(1 for row in rows if row.get("_gt_extraction_source") == "cache")
+        if computed_gt_count and args.gt_entity_facts and not args.no_update_gt_entity_facts:
+            _write_jsonl(
+                args.gt_entity_facts,
+                _gt_entity_fact_cache_rows(rows, judge_model=args.model_name),
+            )
+            print(
+                "Updated GT entity/fact cache: {0} ({1} computed, {2} cached)".format(
+                    args.gt_entity_facts,
+                    computed_gt_count,
+                    cached_gt_count,
+                )
+            )
+        elif cached_gt_count:
+            print("Using precomputed GT entity/fact rows: {0}".format(cached_gt_count))
         _run_extraction_stage(
             rows,
             text_key="_submission_complex_text",
@@ -853,7 +1505,15 @@ def main() -> None:
 
     finalized_rows = _finalize_rows(rows)
     _write_jsonl(per_sample_output_path, finalized_rows)
-    write_json(final_scores_output_path, _build_final_scores(finalized_rows))
+    final_scores = _build_final_scores(finalized_rows)
+    final_scores["submission_format"] = resolved_submission_format
+    final_scores["ground_truth"] = str(args.ground_truth)
+    final_scores["ground_truth_dir"] = str(args.ground_truth_dir) if args.ground_truth_dir else None
+    final_scores["gt_entity_facts"] = str(args.gt_entity_facts) if args.gt_entity_facts else None
+    final_scores["gt_entity_fact_cache_rows_loaded"] = len(gt_entity_fact_cache)
+    final_scores["diagnostic_count"] = len(diagnostics)
+    final_scores["diagnostics"] = diagnostics[:100]
+    write_json(final_scores_output_path, final_scores)
 
     print("Wrote per-sample scores to: {0}".format(per_sample_output_path))
     print("Wrote final scores to: {0}".format(final_scores_output_path))

@@ -25,10 +25,10 @@ from utils.llm_helpers import (
 DEFAULT_BERT_MODEL_TYPE = "microsoft/deberta-xlarge-mnli"
 DEFAULT_BERT_LANG = "en"
 DEFAULT_BERT_RESCALE_WITH_BASELINE = False
-DEFAULT_ID_KEYS = ("sample_id",)
+DEFAULT_ID_KEYS = ("sample_id", "id")
 DEFAULT_SIMPLE_KEYS = ("simple_explanation",)
 DEFAULT_SLE_MODEL_ID = "liamcripwell/sle-base"
-DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "data" / "val_ground_truth.jsonl"
+DEFAULT_GROUND_TRUTH_PATH = Path(__file__).resolve().parent / "ground_truth" / "val" / "reference.jsonl"
 
 
 def _compute_bertscore_batch(

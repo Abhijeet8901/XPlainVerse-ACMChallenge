@@ -130,6 +130,7 @@ def align_submission_and_reference(
     *,
     submission_id_keys: Sequence[str],
     reference_id_keys: Sequence[str],
+    include_missing_submission: bool = False,
 ) -> Tuple[List[Tuple[str, Dict[str, Any], Dict[str, Any]]], List[Dict[str, Any]]]:
     submission_by_id, submission_diagnostics = index_rows_by_id(
         submission_rows,
@@ -164,6 +165,23 @@ def align_submission_and_reference(
                 "sample_id": sample_id,
             }
         )
+
+    if include_missing_submission:
+        seen_reference_ids = set()
+        for reference_row in reference_rows:
+            sample_id_value, id_key = get_first_present(reference_row, reference_id_keys)
+            if id_key is None:
+                continue
+
+            sample_id = str(sample_id_value)
+            if sample_id in seen_reference_ids:
+                continue
+            if sample_id not in reference_by_id:
+                continue
+
+            aligned.append((sample_id, submission_by_id.get(sample_id, {}), reference_by_id[sample_id]))
+            seen_reference_ids.add(sample_id)
+        return aligned, diagnostics
 
     seen_aligned = set()
     for row in submission_rows:
